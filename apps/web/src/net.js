@@ -24,7 +24,7 @@ function clientId(){
   return c;
 }
 
-export function createNet({code, token, nick, on = {}}){
+export function createNet({code, token, nick, on = {}, backoffBase = 1000}){
   let ws = null, cursor = 0, tries = 0, dead = false, n = 0, hb = null;
   const outbox = [];                       // 断线期间攒的帧，连上后按序补发
   const cid = clientId();
@@ -45,7 +45,7 @@ export function createNet({code, token, nick, on = {}}){
       let f; try{ f = JSON.parse(e.data); }catch(err){ return; }
       route(f);
     };
-    ws.onclose = () => {
+    ws.onclose = e => {
       stopBeat();
       if(dead) return;
       /* ★ 重连必须有上限：服务端一旦持续拒绝（token 失效、握手建不起来），
@@ -55,8 +55,10 @@ export function createNet({code, token, nick, on = {}}){
         on.giveup && on.giveup();
         return;
       }
-      const wait = backoff(tries++);       // 指数退避 + 抖动：一屋子人同时重连会把服务端打爆
-      on.close && on.close(wait, tries);
+      const wait = backoff(tries++, backoffBase); // 指数退避 + 抖动：一屋子人同时重连会把服务端打爆
+      // ★ 把关闭码带出去：1006=握手就没成 / 1000=服务端正常关 / 1008/1011=被服务端拒绝。
+      //   没有这个码，用户（和我）只能看到"连不上"，分不清是"连接根本没建立"还是"连上又被踢掉"。
+      on.close && on.close(wait, tries, {code:(e && e.code), reason:(e && e.reason) || ''});
       setTimeout(connect, wait);
     };
     ws.onerror = () => {};                 // 错误统一走 onclose 重连，不额外处理

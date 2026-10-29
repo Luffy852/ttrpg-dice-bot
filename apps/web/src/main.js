@@ -56,7 +56,12 @@ function enter(r){
     code:r.code, token:r.token, nick:r.nick,
     on:{
       open(){ ui.note('已连接 · 房间 <b>' + r.code + '</b>'); },
-      close(){ ui.note('连接断开，正在重连…（已发的指令不会重复掷）'); },
+      close(wait, n, why){
+        // ★ 把关闭码显示出来：排查"连不上"时，这一个数字能区分
+        //   "握手根本没建立"（1006）与"连上后又被服务端踢掉"（1008/1011）
+        const tag = (why && why.code != null) ? ('（关闭码 ' + why.code + (why.reason ? ' · ' + why.reason : '') + '）') : '';
+        ui.note('连接断开，正在重连…（第 ' + n + ' 次' + tag + '）已发的指令不会重复掷');
+      },
       giveup(){
         ui.note('<b>连不上房间了</b>：请刷新页面重试。若反复如此，房间可能已过期（消息只保留 30 天）。');
         ui.failAll && ui.failAll('未送达');
