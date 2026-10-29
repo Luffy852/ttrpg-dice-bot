@@ -1,0 +1,8 @@
+{
+  "name": "@dicebot/engine",
+  "version": "3.0.0",
+  "description": "骰娘引擎：纯 ESM、零依赖、零 DOM/Node API，浏览器与 Worker 共用同一份",
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": "./src/index.js"
+}
