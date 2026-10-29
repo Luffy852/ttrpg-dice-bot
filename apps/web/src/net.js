@@ -15,6 +15,7 @@ import {makeReqId, makeClientId, backoff, cursorOf} from '../vendor/protocol/cur
 
 const HB_MS = 20000;        // 心跳间隔（服务端 45s 无帧断开）
 const PAGE = 200;           // 首屏 / 翻页条数
+const MAX_RETRY = 8;        // 重连上限：约 1 分钟内连不上就停，明确告知而不是无限刷屏
 
 function clientId(){
   let c = null;
@@ -47,8 +48,15 @@ export function createNet({code, token, nick, on = {}}){
     ws.onclose = () => {
       stopBeat();
       if(dead) return;
+      /* ★ 重连必须有上限：服务端一旦持续拒绝（token 失效、握手建不起来），
+       *   无差别重连会让页面一直刷"连接断开，正在重连"、指令永远卡在"发送中" ——
+       *   用户看不出"是彻底连不上"还是"快连上了"。连满 N 次就停下并明说。 */
+      if(tries >= MAX_RETRY){
+        on.giveup && on.giveup();
+        return;
+      }
       const wait = backoff(tries++);       // 指数退避 + 抖动：一屋子人同时重连会把服务端打爆
-      on.close && on.close(wait);
+      on.close && on.close(wait, tries);
       setTimeout(connect, wait);
     };
     ws.onerror = () => {};                 // 错误统一走 onclose 重连，不额外处理

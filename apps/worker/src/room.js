@@ -194,7 +194,8 @@ export class RoomDO extends DurableObject {
         'content-disposition':'attachment; filename="' + out.name + '"'}});
     }
 
-    if(url.pathname === '/ws'){
+    // ★ 兼容两种形式：`/ws`（内部直呼，便于测试）与 `/ws/123456`（Worker 透传原始 request 时的真实路径）
+    if(url.pathname === '/ws' || /^\/ws\/\d{6}$/.test(url.pathname)){
       const v = await verifyToken(url.searchParams.get('token'), this.env.PIN_SECRET);
       if(!v.ok) return new Response('bad token', {status:401});
       if(v.payload.code !== this.code) return new Response('token 与房间不符', {status:401});

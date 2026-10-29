@@ -57,6 +57,10 @@ function enter(r){
     on:{
       open(){ ui.note('已连接 · 房间 <b>' + r.code + '</b>'); },
       close(){ ui.note('连接断开，正在重连…（已发的指令不会重复掷）'); },
+      giveup(){
+        ui.note('<b>连不上房间了</b>：请刷新页面重试。若反复如此，房间可能已过期（消息只保留 30 天）。');
+        ui.failAll && ui.failAll('未送达');
+      },
       welcome(f){ ui.setRoom(f.room); ui.setMe(f.you.nick); ui.setMembers(f.members); },
       batch(msgs){ msgs.forEach(m => ui.append(m)); },
       state(s){ ui.setRoom(s); },                    // ★ 以后端为准回写，不乐观更新

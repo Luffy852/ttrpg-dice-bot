@@ -63,6 +63,14 @@ export function createUI({code, onSubmit, onExport}){
     const el = pending.get(reqId);
     if(el){ el.classList.remove('pending'); el.querySelector('.ts').textContent = (why || '未送达'); }
   }
+  /** 连接彻底放弃时：把所有还挂着的占位气泡标为未送达，别让用户一直盯着"发送中" */
+  function failAll(why){
+    pending.forEach((el, id) => {
+      el.classList.remove('pending');
+      const ts = el.querySelector('.ts');
+      if(ts) ts.textContent = (why || '未送达');
+    });
+  }
 
   function toBottom(){ $stream.scrollTop = $stream.scrollHeight; }
 
@@ -114,7 +122,7 @@ export function createUI({code, onSubmit, onExport}){
   $input.addEventListener('blur', fit);
 
   return {
-    append, appendPending, failPending, refreshTop, toBottom,
+    append, appendPending, failPending, failAll, refreshTop, toBottom,
     setRoom(r){ if(r.rule) st.rule = r.rule; if(r.baredice != null) st.baredice = !!r.baredice; refreshTop(); },
     setMe(me){ st.me = me; refreshTop(); },
     setMembers(list){ st.members = list || []; refreshTop(); },

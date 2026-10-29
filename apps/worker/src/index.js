@@ -74,7 +74,13 @@ export default {
     if(m){
       const token = url.searchParams.get('token');
       if(!token) return new Response('missing token', {status:401});
-      return stubOf(env, m[1]).fetch('https://room.do/ws?token=' + encodeURIComponent(token));
+      /* ★ 必须**原样透传 request**，不能只传 URL。
+       * WebSocket 握手靠的是请求头：Upgrade / Connection / Sec-WebSocket-Key / Sec-WebSocket-Version。
+       * 早先这里写成 `stub.fetch('https://room.do/ws?token=...')` —— 等于只转了 URL，
+       * 那些头全丢了，DO 就算回了 101 也建立不了连接，浏览器立刻断开 → 前端无限重连
+       * （现象：页面一直刷"连接断开，正在重连"，指令卡在"发送中"）。
+       * 透传 request 会把方法与全部请求头一起带过去，握手才成立。 */
+      return stubOf(env, m[1]).fetch(request);
     }
 
     // 静态资源（apps/web）：前端与 Worker 同一域名，所以不需要 CORS
