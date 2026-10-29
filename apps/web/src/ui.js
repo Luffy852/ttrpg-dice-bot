@@ -9,8 +9,8 @@
  * 【★ 去重在这里】按 msg_id 去重（重连补齐可能重复投递）；服务端那边按 req_id 幂等。
  *   两边都要有 —— 只靠服务端，补齐帧在网络层重复仍会渲染两遍。
  * ========================================================================== */
-import * as Engine from '../../../packages/engine/src/index.js';
-import {toRenderable} from '../../../packages/engine/src/render-md.js';
+import * as Engine from '../vendor/engine/index.js';
+import {toRenderable} from '../vendor/engine/render-md.js';
 
 function hhmm(ts){
   const d = new Date(ts);

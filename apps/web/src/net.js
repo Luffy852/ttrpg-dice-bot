@@ -10,8 +10,8 @@
  *
  * 【不做乐观更新】规则/昵称/裸骰的显示一律等 state 帧回写（core 返回什么就显示什么）。
  * ========================================================================== */
-import {IN, OUT, PROTOCOL_VERSION} from '../../../packages/protocol/src/frames.js';
-import {makeReqId, makeClientId, backoff, cursorOf} from '../../../packages/protocol/src/cursor.js';
+import {IN, OUT, PROTOCOL_VERSION} from '../vendor/protocol/frames.js';
+import {makeReqId, makeClientId, backoff, cursorOf} from '../vendor/protocol/cursor.js';
 
 const HB_MS = 20000;        // 心跳间隔（服务端 45s 无帧断开）
 const PAGE = 200;           // 首屏 / 翻页条数
