@@ -1,0 +1,8 @@
+{
+  "name": "@dicebot/protocol",
+  "version": "1.0.0",
+  "description": "ws 帧与 payload 定义：前后端共用同一份，避免各写一份校验导致漂移",
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": "./src/index.js"
+}
