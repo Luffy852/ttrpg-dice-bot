@@ -19,6 +19,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, '..');
 const LEGACY = path.join(ROOT, 'legacy', 'M2_骰娘单机可摸版.html');
 const OUT = path.join(ROOT, 'apps', 'web', 'index.html');
+const WEB = path.join(ROOT, 'apps', 'web');
 
 let html = fs.readFileSync(LEGACY, 'utf8');
 
@@ -111,6 +112,34 @@ const CSS = `
 `;
 html = html.replace('</style>', CSS + '</style>');
 
+/* ★ 把 packages/ 复制进前端目录 vendor/（M3 部署踩坑后补）
+ * 【为什么必须复制】Cloudflare 的 Static Assets **只托管 apps/web 一个目录**。
+ *   前端若用 `../../../packages/engine/...` 引用引擎，浏览器会去请求 `/packages/...`，
+ *   而那个路径根本不在 assets 里 → 404 → 整个模块图加载失败 → 页面按钮全部没反应。
+ *   （沙盒的 dom_smoke 用文件系统路径 import，那条路径在磁盘上存在，所以验不出来。）
+ * 【为什么不是符号链接/改 assets 根】符号链接不保证被上传；把 assets 根提到仓库根
+ *   会把后端源码与测试一起公开出去。复制 + 自检防漂移，是代价最小的做法。
+ */
+function syncVendor(){
+  const jobs = [
+    [path.join(ROOT, 'packages', 'engine', 'src'),   path.join(WEB, 'vendor', 'engine')],
+    [path.join(ROOT, 'packages', 'protocol', 'src'), path.join(WEB, 'vendor', 'protocol')],
+  ];
+  let n = 0;
+  for(const [from, to] of jobs){
+    fs.rmSync(to, {recursive:true, force:true});
+    fs.mkdirSync(to, {recursive:true});
+    for(const f of fs.readdirSync(from)){
+      if(!f.endsWith('.js')) continue;
+      fs.copyFileSync(path.join(from, f), path.join(to, f));
+      n++;
+    }
+  }
+  return n;
+}
+
 fs.mkdirSync(path.dirname(OUT), {recursive:true});
 fs.writeFileSync(OUT, html);
+const vn = syncVendor();
 console.log('✅ 已生成 ' + OUT + '（' + html.length + ' 字节）');
+console.log('✅ 已同步 vendor/：' + vn + ' 个模块（引擎与协议，前端自包含）');

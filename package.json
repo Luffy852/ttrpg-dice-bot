@@ -12,12 +12,13 @@
     "test:worker": "node tests/test_worker.mjs",
     "test:dom": "node tests/dom_smoke.js",
     "mutate": "node tests/mutate_engine_test.js",
-    "check": "node tools/check-engine-split.js && node tools/check-worker.mjs && node tools/check-rule-registry.js",
+    "check": "node tools/check-engine-split.js && node tools/check-worker.mjs && node tools/check-rule-registry.js && node tools/check-assets.mjs",
     "snapshot": "node tools/gen-render-snapshot.mjs",
     "snapshot:check": "node tools/gen-render-snapshot.mjs --check",
     "build:web": "node tools/build-web-shell.mjs",
-    "check:all": "npm run check && npm test && npm run mutate && npm run snapshot:check",
-    "check:rules": "node tools/check-rule-registry.js"
+    "check:all": "npm run build:web && npm run check && npm test && npm run mutate && npm run snapshot:check",
+    "check:rules": "node tools/check-rule-registry.js",
+    "check:assets": "node tools/check-assets.mjs"
   },
   "devDependencies": {
     "jsdom": "^26.1.0",
