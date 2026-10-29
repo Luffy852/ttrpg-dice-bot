@@ -41,6 +41,39 @@ export default {
   async fetch(request, env){
     const url = new URL(request.url);
 
+    /* ★ 在线诊断：打开一个网址就能看到"到底哪一步不通"（纯文本，浏览器直接显示）
+     * 【为什么要有】ws 连不上时，我在沙盒里**拿不到任何服务端日志**（部署不了、没有 tail）。
+     *   只能靠推理，已经错了两轮。这个端点把运行时的事实一次性打出来：
+     *   密钥有没有、DO 绑定在不在、房间号能不能匹配、DO 能不能访问。
+     *   用法：浏览器打开 /api/diag?code=123456 —— 把看到的文字整段发给我。 */
+    if(url.pathname === '/api/diag'){
+      const code = (url.searchParams.get('code') || '').trim();
+      const L = [];
+      const say = (k, v) => L.push(k.padEnd(22) + ' : ' + v);
+      say('Worker', '运行中（能看到这行就说明 Worker 活着）');
+      say('PIN_SECRET', env.PIN_SECRET ? ('已设置（长度 ' + String(env.PIN_SECRET).length + '）') : '❌ 未设置');
+      say('ROOM 绑定', env.ROOM ? '已绑定' : '❌ 未绑定（wrangler.toml 的 durable_objects 没生效）');
+      say('ASSETS 绑定', env.ASSETS ? '已绑定' : '❌ 未绑定');
+      say('房间号入参', code ? code : '（未带 code 参数）');
+      say('房间号格式(6位数字)', /^\d{6}$/.test(code) ? '✅ 合法' : '❌ 不合法');
+      if(env.ROOM && /^\d{6}$/.test(code)){
+        try{
+          const r = await stubOf(env, code).fetch('https://room.do/meta');
+          const j = await r.json().catch(() => ({}));
+          say('DO 可访问', '✅ 是（HTTP ' + r.status + '）');
+          say('DO 返回的房间号', j.code || '(空)');
+          say('DO 是否认得这个房间', (j.code === code) ? '✅ 认得' : '❌ 对不上（DO 的 idFromName 与房间号不一致）');
+          say('规则', j.rule || '(空)');
+          say('成员数', (j.members || []).length);
+        }catch(e){
+          say('DO 可访问', '❌ 抛异常：' + String(e && e.message || e));
+        }
+      }
+      L.push('');
+      L.push('—— 如果上面都正常但仍连不上，请把这段整段发我 ——');
+      return new Response(L.join('\n'), {headers:{'content-type':'text/plain; charset=utf-8'}});
+    }
+
     if(url.pathname === '/api/room' && request.method === 'POST'){
       let body = {};
       try{ body = await request.json(); }catch(e){}

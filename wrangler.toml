@@ -4,9 +4,21 @@ main = "apps/worker/src/index.js"        # 相对于仓库根
 compatibility_date = "2026-10-29"
 
 # 前端零构建：原生 ESM 整个目录托管（推荐项 ③）
+#
+# ★★ run_worker_first = true 是**必需项**，不是优化项 ★★
+#   默认行为（run_worker_first = false）：Cloudflare **先找静态资源**，找不到才调 Worker。
+#   而 not_found_handling = "single-page-application" 的意思是"找不到的路径一律返回
+#   index.html + 200"。WebSocket 握手请求 /ws/123456 在资源目录里当然没有对应文件，
+#   于是被当成 SPA 兜底路径 → 返回 200 + index.html。
+#   浏览器期待的是 101 Switching Protocols，收到 200 就判定握手失败 → **关闭码 1006**
+#   （表现：页面一直"正在重连"、指令永远卡在"发送中"）。
+#   设了 run_worker_first = true，Worker 先跑，/ws/ 与 /api/ 被 Worker 接住，
+#   其余请求再由 Worker 转给 env.ASSETS，SPA 兜底照常生效。
 [assets]
 directory = "apps/web"                   # 前端零构建：整个目录托管
+binding = "ASSETS"                       # 默认就是 ASSETS，显式写出来避免歧义
 not_found_handling = "single-page-application"
+run_worker_first = true
 
 # 每个房间一个 DO，SQLite 持久化
 [[durable_objects.bindings]]
