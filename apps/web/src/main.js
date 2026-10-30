@@ -71,7 +71,13 @@ function enter(r){
       state(s){ ui.setRoom(s); },                    // ★ 以后端为准回写，不乐观更新
       presence(list){ ui.setMembers(list); },
       ack(){ /* 真实消息由 batch 到达；占位气泡到那时才移除 */ },
-      dup(reqId){ /* 重试命中幂等：不发第二颗骰，占位气泡等 batch 里那条 */ },
+      /* ★ dup 帧**不带 batch**，所以绝对不能"什么都不做"地干等 ——
+         占位气泡会永远停在"发送中"。正常路径下 batch 会先到、pending 那时已被移除，
+         能走到这里说明前端确实没渲染过这条（典型：刷新后 req_id 与历史撞车）。
+         明确告知，让用户知道发生了什么，而不是对着"发送中"干等。 */
+      dup(reqId, seq, deleted){
+        ui.failPending(reqId, deleted ? '这条已被清理' : '已掷过（重复请求）');
+      },
       reject(reqId, code){
         ui.failPending(reqId, code === 'rate_limited' ? '太密了，慢一点' :
           (code === 'too_long' ? '指令太长（≤400 字）' : '未送达'));

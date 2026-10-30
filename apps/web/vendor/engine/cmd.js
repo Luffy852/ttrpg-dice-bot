@@ -69,8 +69,17 @@ function handleCommand(text, ctx){
   const mk = o => { const m = Object.assign({id:room.nextId(), ts:new Date()}, o); return m; };
   const say = o => out.push(mk(o));
   const notice = html => say({kind:'notice', from:'骰娘', actor:me, html});
-  const defs = d => say({kind:'html', from:'骰娘', actor:me, html:renderDefs(d)});
-  const page = html => say({kind:'html', from:'骰娘', actor:me, html});
+  /* ★★ 两个字段都给：defs（结构化）给服务端落库，html（已渲染）给就地渲染。
+   * 【为什么必须带 defs】core.js 的 factsOf 读的是 `msg.defs`（协议 KIND.HTML 白名单只有
+   *   defs），前端 toRenderable 也是 `{defs:p.defs, html:defsHtml(p.defs)}`。
+   *   只给 html 串的后果：落库时 `msg.defs` 是 undefined → payload 变成 `{}` →
+   *   前端渲染出一个**空气泡** —— 表现就是「.st / .help / .status 有回复但内容为空」，
+   *   而 .r（roll，走 view）与 .rc 未绑卡（notice，走 html）都正常，极易误判成"只有掷骰能用"。
+   *   原则：库里存结构化事实，不存渲染好的串（改样式不必迁移历史数据）。 */
+  const defs = d => say({kind:'html', from:'骰娘', actor:me, defs:d, html:renderDefs(d)});
+  /* page 用于已经是 HTML 串的内容（角色卡栅格这类富排版，无法用 rows 表达）。
+     包成 {raw} 走同一条 defs 通道 —— 否则这条消息同样会变空气泡。 */
+  const page = html => say({kind:'html', from:'骰娘', actor:me, defs:{raw:html}, html});
 
   const cmd = parseCommand(text);
   if(!cmd){

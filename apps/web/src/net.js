@@ -17,11 +17,19 @@ const HB_MS = 20000;        // 心跳间隔（服务端 45s 无帧断开）
 const PAGE = 200;           // 首屏 / 翻页条数
 const MAX_RETRY = 8;        // 重连上限：约 1 分钟内连不上就停，明确告知而不是无限刷屏
 
+/* ★★ req_id = cid + '-' + 序号。cid 必须**每次页面加载都重新生成，绝不持久化**。
+ * 【为什么】持久化到 localStorage 的后果（2026-10-30 实测复现）：
+ *   刷新页面 → cid 不变、序号 n 归零 → req_id 与**上次会话逐条完全相同**
+ *   → 服务端幂等命中 → 只回 `dup` 帧，**dup 不带 batch**
+ *   → 前端占位气泡永远等不到替换 → 表现是"一直发送中"，且之后每条都撞
+ *   （幂等表 30 天才清理，所以 30 天内这个房间刷新一次就撞一次）。
+ * 【为什么不持久化也安全】幂等的用武之地是"同一页面内重连补发 outbox"——
+ *   那时 cid 不变、序号已分配，重发拿到 dup 而不是第二颗骰，语义正是我们要的。
+ *   刷新后是一个全新的会话，本来就该用新编号。 */
+let CID = null;
 function clientId(){
-  let c = null;
-  try{ c = localStorage.getItem('db:cid'); }catch(e){}
-  if(!c){ c = makeClientId(crypto); try{ localStorage.setItem('db:cid', c); }catch(e){} }
-  return c;
+  if(!CID) CID = makeClientId(crypto);
+  return CID;
 }
 
 export function createNet({code, token, nick, on = {}, backoffBase = 1000}){

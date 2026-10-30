@@ -191,6 +191,38 @@ console.log('== 7. ★★ 用户消息必须留存（指令与闲聊同权，成
     'cmd+chat=' + all.filter(m => m.kind === 'cmd' || m.kind === 'chat').length);
 }
 
+console.log('== 8. ★ html kind 必须带 defs（否则落库后是空气泡）==');
+/* 【为什么单列一节】协议 KIND.HTML 的白名单只有 `defs`，core.js 的 factsOf 读 `msg.defs`，
+ *   前端 toRenderable 也是 `defsHtml(p.defs)`。而引擎原先只给 `html`（渲染好的串）——
+ *   于是 `.st / .help / .status / .st set / .rc list` 落库后 payload 变成 `{}`，
+ *   前端渲染出**空气泡**：用户看到"有回复但内容是空的"，极易误判成"只有 .r 能用"。
+ *   （roll 走 view、notice 走 html、sys 走 title，都不受影响 —— 所以这个 bug 只在 html kind 上。）
+ *   这一节锁的是"引擎产出"与"协议字段"之间的接口不漂移。 */
+{
+  const cmds = ['.st', '.help', '.status', '.rc list', '.st set 侦查 60'];
+  let t = 1772000000000;
+  const st = createMemoryStorage('654321');
+  const core = createRoomCore(st, {now: () => (t += 1000)});
+  for(const c of cmds){
+    // ① 引擎侧：html kind 必须带 defs（结构化），不能只带 html 串
+    const ctx = {me:'老王', room:Engine.makeRoom(), card:null, history:[]};
+    ctx.room.rule = 'coc7';
+    const outs = Engine.handleCommand(c, ctx).msgs.filter(m => m.kind === 'html');
+    for(const m of outs){
+      ok('★ 引擎 html 消息带 defs：' + c, !!m.defs && typeof m.defs === 'object',
+        '字段=' + Object.keys(m).join(','));
+      ok('　defs 能渲染出内容（不是空气泡）：' + c,
+        Engine.defsHtml(m.defs || {}).length > 20, 'len=' + Engine.defsHtml(m.defs || {}).length);
+    }
+    // ② 落库侧：走真实 apply，payload.defs 不能是空对象
+    const r = await core.apply({reqId:'h-' + c, text:c, anonId:'a1', nick:'老王'});
+    for(const m of r.msgs.filter(x => x.kind === 'html')){
+      ok('★ 落库 payload.defs 非空：' + c, !!m.payload.defs && Object.keys(m.payload.defs).length > 0,
+        'payload=' + JSON.stringify(m.payload));
+    }
+  }
+}
+
 console.log('---------------------------');
 console.log('Worker 纯逻辑：通过 ' + pass + ' 项，失败 ' + fail + ' 项');
 console.log('⚠️  未验（只能你部署后验）：room.js 的 DO 行为 / index.js 路由 / wrangler 配置 / 真实 ws');

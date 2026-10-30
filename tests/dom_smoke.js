@@ -111,7 +111,10 @@ async function boot(){
     else if(f.t === OUT.STATE){ ui.setRoom(f.room); }
     else if(f.t === OUT.PRESENCE){ ui.setMembers(f.members); }
     else if(f.t === OUT.REJECT){ ui.failPending(f.req_id, f.code); }
-    else if(f.t === OUT.DUP){ /* 不重掷；真实消息由 batch 到达 */ }
+    else if(f.t === OUT.DUP){
+      // ★ 与 main.js 的 on.dup 保持一致：dup 不带 batch，必须标记占位气泡，否则永远"发送中"
+      ui.failPending(f.req_id, f.deleted ? '这条已被清理' : '已掷过（重复请求）');
+    }
   }
 
   const ui = createUI({
@@ -205,6 +208,36 @@ function type(ui, net, text){
   const n2 = await syncAll();
   ok('★ 补齐第二次不产生重复（msg_id 去重）', n2 === n1, 'n1=' + n1 + ' n2=' + n2);
   ok('★ 补齐后不遗漏（页面条数 ≥ 服务端消息数）', n2 >= all.length, 'dom=' + n2 + ' server=' + all.length);
+
+  /* ★★ 刷新页面后 req_id 不能与历史撞车（2026-10-30 实测：撞车 → 只回 dup、
+   *   不带 batch → 占位气泡永远"发送中"，且之后每条都撞）。
+   *   模拟"刷新"= 强制重新加载 net.js 模块（拿到全新的模块作用域）。
+   *   两次加载各建一个 net，比较 send 出来的 req_id 前缀（前缀就是 cid）。 */
+  const pre = r => String(r).slice(0, String(r).lastIndexOf('-'));
+  const m1 = await import('../apps/web/src/net.js?fresh=1');
+  const m2 = await import('../apps/web/src/net.js?fresh=2');
+  const na = m1.createNet({code:'123456', token:'t', nick:'x', on:{}});   // 不 connect：send 只进 outbox
+  const nb = m2.createNet({code:'123456', token:'t', nick:'x', on:{}});
+  const ra = na.send('.r 1d6'), rb = nb.send('.r 1d6');
+  ok('★ 刷新页面后 cid 重新生成（req_id 不与上次会话撞车）',
+    pre(ra) !== pre(rb), ra + ' vs ' + rb);
+  ok('★ cid 不再写进 localStorage（持久化 = 刷新后撞车）',
+    w.localStorage.getItem('db:cid') === null, 'db:cid=' + w.localStorage.getItem('db:cid'));
+
+  /* ★ 撞车时的兜底：用历史上已存在的 req_id 再发一次 → 服务端回 dup（不带 batch）
+   *   → 前端必须把占位气泡标记掉，不能让它永远"发送中"。 */
+  ui.appendPending('manual-dup-test', '.r 1d6');
+  const pendBefore = d.querySelectorAll('.msg.pending').length;
+  await w.__net__.__onFrame({t:'cmd', req_id:'manual-dup-test', text:'.r 1d6'});
+  await sleep(10);
+  const pendAfter = d.querySelectorAll('.msg.pending').length;
+  ok('★ req_id 撞车时占位气泡被标记，不会永远"发送中"',
+    pendBefore === 1 && pendAfter === 0, 'before=' + pendBefore + ' after=' + pendAfter);
+  // ★ 静态断言：生产 main.js 的 on.dup 不能是空实现（上面测的是替身 route，两者会漂移）
+  const mainSrc = fs.readFileSync(path.join(ROOT, 'apps', 'web', 'src', 'main.js'), 'utf8');
+  const dupBody = mainSrc.slice(mainSrc.indexOf('dup(reqId'), mainSrc.indexOf('reject(reqId'));
+  ok('★ 生产 main.js 的 on.dup 也会处理占位气泡（不是空实现）',
+    /failPending/.test(dupBody), dupBody.slice(0, 80));
 
   console.log(bad ? ('\n❌ 端到端冒烟：' + bad + ' 项不通过') : '\n✅ 端到端冒烟全通过');
   process.exit(bad ? 1 : 0);

@@ -143,6 +143,8 @@ function renderHtml(html){ return '<div class="bubble">' + html + '</div>'; }
 
 // 指令 / 说明 分栏渲染。v 允许含有限标签（调用方对动态内容自行 esc）
 function defsHtml(d){
+  // raw：调用方已渲染好的片段（角色卡栅格这类无法用 rows 表达的富排版），原样透传
+  if(d.raw) return d.raw;
   let h = '';
   if(d.title) h += '<div class="ht">' + esc(d.title) + '</div>';
   (d.sections || [{rows:d.rows}]).forEach(s => {
