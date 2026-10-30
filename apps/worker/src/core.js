@@ -90,14 +90,19 @@ export function createRoomCore(storage, opts){
 
     const ctx = await buildCtx(anonId, nick);
     const before = ctx._roomBefore;
-    const r = Engine.handleCommand(text, ctx);
 
-    // ④ 不是指令 → 用户原文也要进消息记录（呈现原则 3：用户指令必须可回看）
-    let out = r.msgs;
-    let userMsg = null;
-    if(!out.length){
-      userMsg = {kind:Engine.isCommandText(text) ? KIND.CMD : KIND.CHAT, payload:{text}};
-    }
+    /* ④ ★★ 用户原文**无条件**进消息记录（呈现原则 3：用户指令必须可回看）
+     *    —— 不是"只在引擎没输出时才记"。
+     * 【为什么必须无条件】M2 的 LocalSource.send() 就是无条件先 emit 用户消息再 emit 结果。
+     *   写成 `if(!out.length)` 的后果：**所有成功的指令**用户原文都被丢掉 ——
+     *   而骰点类指令占消息的 60–80%，等于绝大多数"我当时打了什么"无法回溯，
+     *   导出的战报也只剩骰娘的结果、没有玩家的输入。
+     * 【为什么在 handleCommand 之前定型】用**指令执行前**的房间状态判断是不是指令
+     *   （裸骰开关若被本条指令自己打开，不该把这条 retroactive 算成指令），
+     *   且与 M2 的 emit 顺序一致。isCommandText 的第二个参数就是房间状态，不能省。 */
+    const userMsg = {kind:Engine.isCommandText(text, ctx.room) ? KIND.CMD : KIND.CHAT, payload:{text}};
+    const r = Engine.handleCommand(text, ctx);
+    const out = r.msgs;
 
     const n = out.length + (userMsg ? 1 : 0);
     const base = await storage.allocSeq(n);
