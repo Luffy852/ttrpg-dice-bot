@@ -199,13 +199,21 @@ export class RoomDO extends DurableObject {
       const v = await verifyToken(url.searchParams.get('token'), this.env.PIN_SECRET);
       if(!v.ok) return new Response('bad token', {status:401});
       if(v.payload.code !== this.code) return new Response('token 与房间不符', {status:401});
+      /* ★★ 这一行就是"ws 关闭码 1006"的根因（2026-10-30 实测确认）★★
+         `new WebSocketPair()` 返回的是**下标 0 / 1 两个槽位**的对象，
+         **没有** `.server` / `.client` 这两个属性 —— 所以 `pair.server` 是 undefined，
+         acceptWebSocket(undefined) 直接抛
+           "parameter 1 is not of type 'WebSocket'"
+         → DO 回 500 → 浏览器期待 101 却收到 500 → 关闭码 1006。
+         官方写法是 Object.values() 取（两个槽位顺序不保证，不能用下标硬编码语义）。 */
       const pair = new WebSocketPair();
-      this.ctx.acceptWebSocket(pair.server);
+      const [client, server] = Object.values(pair);
+      this.ctx.acceptWebSocket(server);
       // ★ 身份只存 attachment：DO 休眠唤醒后内存态丢失，attachment 会被恢复
-      pair.server.serializeAttachment({anon_id:v.payload.anon_id});
+      server.serializeAttachment({anon_id:v.payload.anon_id});
       this.sql.exec('UPDATE members SET last_seen = ? WHERE anon_id = ?', Date.now(), v.payload.anon_id);
       this.sql.exec('UPDATE room SET last_active = ? WHERE id = 1', Date.now());
-      return new Response(null, {status:101, webSocket:pair.client});
+      return new Response(null, {status:101, webSocket:client});
     }
     return new Response('not found', {status:404});
   }
