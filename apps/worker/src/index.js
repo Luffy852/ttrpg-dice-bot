@@ -16,7 +16,7 @@
  *   ② 全局 500M 清理不在这里 —— DO 之间无全局视图，需要 KV 索引 + Cron（阶段 4 的 cron.js）。
  * ========================================================================== */
 import {RoomDO} from './room.js';
-import {newCode, isCode, isPin} from './auth.js';
+import {newCode, isCode, isPin, signToken} from './auth.js';
 
 export {RoomDO};
 
@@ -46,6 +46,44 @@ export default {
      *   只能靠推理，已经错了两轮。这个端点把运行时的事实一次性打出来：
      *   密钥有没有、DO 绑定在不在、房间号能不能匹配、DO 能不能访问。
      *   用法：浏览器打开 /api/diag?code=123456 —— 把看到的文字整段发给我。 */
+    /* ★ ws 握手专项诊断：从 Worker 内部用 fetch 带 Upgrade 头打一次 DO，看它回什么
+     * 【与 /api/diag 的区别】/api/diag 只证明"DO 活着、认得房间号"；
+     *   这里直接模拟一次 WebSocket 握手，能区分三种失败：
+     *     ① DO 回了 101        → 服务端没问题，问题在 Cloudflare 的路由/静态资源层
+     *     ② DO 回了 401        → token 校验挂了（PIN_SECRET 变了 / token 过期）
+     *     ③ DO 回了 404/500    → 路由没匹配或代码抛异常
+     *   用法：浏览器打开 /api/wsdiag?code=123456 */
+    if(url.pathname === '/api/wsdiag'){
+      const c = (url.searchParams.get('code') || '').trim();
+      const L = [];
+      const say = (k, v) => L.push(k.padEnd(24) + ' : ' + v);
+      if(!/^\d{6}$/.test(c)){
+        return new Response('需要 6 位房间号：/api/wsdiag?code=123456', {status:400,
+          headers:{'content-type':'text/plain; charset=utf-8'}});
+      }
+      try{
+        const t = await signToken({code:c, anon_id:'diag', exp:Math.floor(Date.now() / 1000) + 300}, env.PIN_SECRET);
+        const up = new Request('https://room.do/ws/' + c + '?token=' + encodeURIComponent(t), {
+          headers:{'Upgrade':'websocket', 'Connection':'Upgrade',
+            'Sec-WebSocket-Key':'dGhlIHNhbXBsZSBub25jZQ==', 'Sec-WebSocket-Version':'13'},
+        });
+        const r = await stubOf(env, c).fetch(up);
+        say('DO 握手返回状态', r.status + '  ' + ((r.status === 101) ? '✅ 101 = 握手成功' : '❌ 期待 101'));
+        say('Upgrade 响应头', r.headers.get('Upgrade') || '(无)');
+        say('Connection 响应头', r.headers.get('Connection') || '(无)');
+        say('webSocket 对象', r.webSocket ? '✅ 已附上' : '❌ 缺失（DO 没走 WebSocketPair）');
+        L.push('');
+        L.push('判读：');
+        L.push('  101 + 已附上 → 服务端 OK，问题在 Cloudflare 路由层（run_worker_first / 静态资源）');
+        L.push('  401          → token 校验挂了：PIN_SECRET 与签发时不一致，或服务器时间不对');
+        L.push('  404          → DO 里没匹配上 /ws 路径（room.js 的路由）');
+        L.push('  500          → DO 代码抛异常');
+      }catch(e){
+        say('DO 握手', '❌ 抛异常：' + String((e && e.message) || e));
+      }
+      return new Response(L.join('\n'), {headers:{'content-type':'text/plain; charset=utf-8'}});
+    }
+
     if(url.pathname === '/api/diag'){
       const code = (url.searchParams.get('code') || '').trim();
       const L = [];
