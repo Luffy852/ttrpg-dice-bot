@@ -12,6 +12,8 @@ import * as Engine from '../packages/engine/src/index.js';
 import {hashPin, verifyPin, newSalt, signToken, verifyToken, TOKEN_TTL, newCode, isCode, isPin}
   from '../apps/worker/src/auth.js';
 import {toNdjson, fromNdjson, toBattle, exportAs, FORMAT} from '../apps/worker/src/export.js';
+import {createRoomCore} from '../apps/worker/src/core.js';
+import {createMemoryStorage} from './memory_storage.mjs';
 
 let pass = 0, fail = 0;
 const ok = (n, c, extra) => { if(c) pass++; else { fail++; console.log('  ❌ ' + n + (extra ? ' :: ' + extra : '')); } };
@@ -138,6 +140,55 @@ console.log('== 6. 四套规则的战报都能出（不是只有 COC 能跑） =
     const v = Engine.viewFromPayload(m.payload);
     ok('还原与当时一致：' + rule, typeof v.total === 'number' && !Number.isNaN(v.total), 'total=' + v.total);
   }
+}
+
+console.log('== 7. ★★ 用户消息必须留存（指令与闲聊同权，成功指令也不例外） ==');
+/* 【为什么单列一节】档案「呈现基线」与 M2 的 LocalSource.send() 都写明：
+ *   用户自己发的**每一条**都要进消息记录 —— 打错了能看见、能回溯、导出战报才完整。
+ *   M2 的做法是 send() 里**无条件先 emit** 用户消息（cmd / chat），再 emit 引擎结果。
+ *   M3 搬进 core.js 时变成了「只在引擎没输出时才记」，于是**所有成功的指令**（.r / .st /
+ *   .set rule …）用户原文都被丢掉了 —— 而这恰恰是骰点类指令（占 60–80%）的全部。
+ *   旧测试没抓到，是因为第 4 / 5 节里的 cmd 消息是**手搓的字面量**，从没真跑过 apply()。
+ *   这一节全部走真实调用：createRoomCore + apply。 */
+{
+  let t = 1772000000000;
+  const st = createMemoryStorage('123456');
+  const core = createRoomCore(st, {now: () => (t += 1000)});
+  const send = (id, text) => core.apply({reqId:id, text, anonId:'a1', nick:'老王'});
+
+  /* 每一例：[指令, 期望的用户消息 kind, 期望的骰娘回复 kind（null=没有回复）] */
+  const cases = [
+    ['大家好',        'chat', null],      // 闲聊：只有用户消息
+    ['.zzz 乱敲的',   'chat', null],      // 没命中动词 → 按聊天记（isCommandText 只认已知动词）
+    ['.r 2d6+3',     'cmd',  'roll'],    // ★ 成功掷骰：用户原文 + 骰点，两条都要有
+    ['.set rule coc','cmd',  'sys'],     // ★ 改规则：用户原文 + 全房广播
+  ];
+  for(const [text, userKind, botKind] of cases){
+    const r = await send('q-' + text, text);
+    const kinds = r.msgs.map(m => m.kind);
+    const u = r.msgs.find(m => m.kind === userKind);
+    ok('★ 落库了用户消息：' + text, !!u, 'kinds=' + kinds.join(','));
+    if(u){
+      eq('　原文逐字保留：' + text, u.payload.text, text);
+      eq('　from 是本人（不是骰娘）', u.from, '老王');
+      eq('　带 anon_id', u.anon_id, 'a1');
+      eq('　带 req_id（可与回复配对）', u.req_id, 'q-' + text);
+    }
+    if(botKind){
+      const b = r.msgs.find(m => m.kind === botKind);
+      ok('　骰娘回复也在：' + text, !!b, 'kinds=' + kinds.join(','));
+      if(u && b) ok('　★ 顺序：用户消息在前、回复在后', u.seq < b.seq, u.seq + ' < ' + b.seq);
+    }
+  }
+
+  // ★ 落库 = 能补齐 = 能导出：用户消息必须真的进了 storage，而不是只在返回值里
+  const all = await st.since(0, 100);        // memory_storage.since 直接返回数组
+  const texts = all.map(m => (m.payload && m.payload.text) || '').filter(Boolean);
+  ok('★ storage 里能查到用户原文（重连补齐 / 导出战报都靠它）',
+    texts.includes('.r 2d6+3') && texts.includes('大家好'), texts.join(' | '));
+  ok('★ 用户消息与骰娘回复条数成对（每条输入至少 1 条）',
+    all.filter(m => m.kind === 'cmd' || m.kind === 'chat').length >= 3,
+    'cmd+chat=' + all.filter(m => m.kind === 'cmd' || m.kind === 'chat').length);
 }
 
 console.log('---------------------------');

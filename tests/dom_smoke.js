@@ -178,9 +178,17 @@ function type(ui, net, text){
   ok('系统消息 ≥ 1（切规则有广播）', sys >= 1, 'sys=' + sys);
   ok('★ 合计行不含「调整项 +0」', zero.length === 0, zero.slice(0, 2).join(' | '));
   ok('★ 占位气泡都被真实消息替换（幂等生效）', pendingLeft === 0, 'pending=' + pendingLeft);
-  ok('★ 服务端只有 1 条 manual-dup-test（重发没重掷）',
-    all.filter(m => m.req_id === 'manual-dup-test').length === 1,
-    'n=' + all.filter(m => m.req_id === 'manual-dup-test').length);
+  /* ★ 重发同一 req_id：该 req_id 下现在有**两条**是正确行为 ——
+   *   ① 用户原文（cmd）② 骰娘的骰点（roll）。要锁的是"**骰点只有一条**"，
+   *   即重发没有掷第二次；原文也只有一条（没被记两遍）。
+   *   （旧断言写"该 req_id 总共只有 1 条"，那是"用户原文不落库"时代的口径，已过时。） */
+  const dup = all.filter(m => m.req_id === 'manual-dup-test');
+  ok('★ 重发没重掷（该 req_id 只有 1 条骰点）',
+    dup.filter(m => m.kind === 'roll').length === 1,
+    'rolls=' + dup.filter(m => m.kind === 'roll').length);
+  ok('★ 重发也没把用户原文记两遍（该 req_id 只有 1 条 cmd）',
+    dup.filter(m => m.kind === 'cmd').length === 1,
+    'cmd=' + dup.filter(m => m.kind === 'cmd').length);
   ok('★ 语义标签在渲染产物里（百分骰十位/个位）', /class="plab"/.test(d.body.innerHTML));
   ok('★ 消息按 seq 严格递增落库', all.every((m, i) => i === 0 || m.seq > all[i - 1].seq));
   ok('★ 页面无 JS 错误', errs.length === 0, errs.slice(0, 3).join(' / '));
