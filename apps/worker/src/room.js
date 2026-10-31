@@ -33,7 +33,7 @@ const WARN_DAYS = 23;          // 到期前 7 天提醒（档案：清理动作�
 
 /* ★ schema 的唯一出处是 schema.sql（含注释与理由）；这里是它的运行时副本。
    tools/check-worker.mjs 会比对两者是否一致 —— 不能只在其中一处改。 */
-export const SCHEMA = [
+export const TABLES = [
   `CREATE TABLE IF NOT EXISTS room (
      id INTEGER PRIMARY KEY CHECK (id = 1), code TEXT NOT NULL, created_at INTEGER NOT NULL,
      last_active INTEGER NOT NULL, rule TEXT NOT NULL DEFAULT 'generic', baredice INTEGER NOT NULL DEFAULT 0,
@@ -48,30 +48,48 @@ export const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS members (
      anon_id TEXT PRIMARY KEY, cid TEXT, nick TEXT NOT NULL, joined_at INTEGER NOT NULL,
      last_seen INTEGER NOT NULL, msg_count INTEGER NOT NULL DEFAULT 0)`,
-  `CREATE INDEX IF NOT EXISTS idx_members_cid ON members(cid)`,
   `CREATE TABLE IF NOT EXISTS messages (
      seq INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, ts INTEGER NOT NULL, kind TEXT NOT NULL,
      from_name TEXT NOT NULL, actor TEXT, anon_id TEXT, req_id TEXT, rule_at TEXT, payload TEXT NOT NULL)`,
-  `CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts)`,
-  `CREATE INDEX IF NOT EXISTS idx_messages_req ON messages(req_id)`,
-  `CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(anon_id, seq)`,
+
   `CREATE TABLE IF NOT EXISTS idempotency (req_id TEXT PRIMARY KEY, seq INTEGER NOT NULL, ts INTEGER NOT NULL)`,
-  `CREATE INDEX IF NOT EXISTS idx_idem_ts ON idempotency(ts)`,
   `CREATE TABLE IF NOT EXISTS pcs (anon_id TEXT PRIMARY KEY, family TEXT NOT NULL,
      version INTEGER NOT NULL DEFAULT 1, data TEXT NOT NULL, updated_at INTEGER NOT NULL)`,
 ];
+
+/* ★★ 索引必须**在建表 + 迁移之后**单独建（2026-10-31 线上事故 · 房间 009950 打不开）★★
+ * 【事故经过】本次部署给 members 加了 cid 列，并把 `CREATE INDEX ... ON members(cid)`
+ *   直接混在 SCHEMA 里。对**已存在的旧房间**：CREATE TABLE IF NOT EXISTS 什么都不做，
+ *   cid 列还不存在，于是建索引立刻抛 "no such column: cid" —— DO 构造函数崩
+ *   → 任何请求都 500，ws 握手也拿不到 101 → 浏览器报关闭码 1006。
+ *   新房间（表是这次一起建的，自带 cid）完全正常，所以自测全绿、只有老房间炸。
+ * 【为什么不能只靠 try/catch 把 ALTER 挪前面】顺序本身就是契约：
+ *   表 → 迁移补列 → 索引。这里拆成两个数组，让顺序在代码里显式可见。 */
+export const INDEXES = [
+  `CREATE INDEX IF NOT EXISTS idx_members_cid ON members(cid)`,
+  `CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts)`,
+  `CREATE INDEX IF NOT EXISTS idx_messages_req ON messages(req_id)`,
+  `CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(anon_id, seq)`,
+  `CREATE INDEX IF NOT EXISTS idx_idem_ts ON idempotency(ts)`,
+];
+/** 兼容旧名（tools/check-worker.mjs 与其它引用） */
+export const SCHEMA = TABLES.concat(INDEXES);
 
 export class RoomDO extends DurableObject {
   constructor(ctx, env){
     super(ctx, env);
     this.ctx = ctx; this.env = env; this.sql = ctx.storage.sql;
-    SCHEMA.forEach(s => this.sql.exec(s));
+    TABLES.forEach(s => this.sql.exec(s));
     /* ★ 旧库迁移：CREATE TABLE IF NOT EXISTS 对**已存在**的表什么都不做，
      *   所以已经跑过一轮的房间（里面有真实的卡和消息）不会自动长出 cid 列。
      *   这里补一条 ALTER；SQLite 没有 ADD COLUMN IF NOT EXISTS，
      *   列已存在会抛 "duplicate column name" —— 吞掉即可（幂等靠 try/catch）。
      *   【为什么不重建表】房间里有 30 天的消息与角色卡，重建 = 数据清空。 */
     try{ this.sql.exec('ALTER TABLE members ADD COLUMN cid TEXT'); }catch(e){ /* 列已存在 */ }
+    /* ★ 逐条建且不让它炸：索引只是加速，缺了最多变慢；而构造函数抛异常 =
+     *   这个房间**彻底打不开**（HTTP 500 + ws 1006，009950 就是这样挂的）。
+     *   顺序（ALTER 之后）已经保证了正常路径，这里是最后一道保险。 */
+    INDEXES.forEach(s => { try{ this.sql.exec(s); }catch(e){ /* 索引缺失只影响性能，不致命 */ } });
     /* ★ 在线人数 = **当前活跃 ws 连接数**（用户已定口径）。
      * 【为什么不查 members 表的 last_seen】那是累计接入人次，永不减少 ——
      *   一个人反复刷新/重连就一路累加（真机：3 人的房间显示 13 人）。
@@ -205,10 +223,15 @@ export class RoomDO extends DurableObject {
       let cid = typeof body.cid === 'string' ? body.cid.trim().slice(0, 64) : '';
       if(cid && !/^[A-Za-z0-9_-]{8,64}$/.test(cid)) cid = '';      // 不合法就当没有，不报错（保守）
       let anonId = null;
-      if(cid){
-        const old = this.sql.exec('SELECT anon_id FROM members WHERE cid = ?', cid).toArray()[0];
-        if(old) anonId = old.anon_id;                              // ★ 同一个 cid 一定是同一个人
-      }
+      /* ★ 找回身份失败**不能**让进房失败：老房间可能因为迁移没跑到而缺 cid 列，
+       *   那时这条 SELECT 会抛 —— 后果是房间彻底进不去（500）。
+       *   退化成"发新身份"最多是这次没找回卡，远好于进不去房间。 */
+      try{
+        if(cid){
+          const old = this.sql.exec('SELECT anon_id FROM members WHERE cid = ?', cid).toArray()[0];
+          if(old) anonId = old.anon_id;                            // ★ 同一个 cid 一定是同一个人
+        }
+      }catch(e){ anonId = null; }
       if(!anonId){
         anonId = crypto.randomUUID();
         this.sql.exec('INSERT OR IGNORE INTO members (anon_id, cid, nick, joined_at, last_seen, msg_count) VALUES (?, ?, ?, ?, ?, 0)',
@@ -216,8 +239,13 @@ export class RoomDO extends DurableObject {
       }
       // 老身份回来时补写 cid（迁移前建的行没有 cid），并刷新 last_seen
       // ★ SQL 里用双引号写空串：单引号会把 JS 字符串截断（打包时才发现，代价太大）
-      if(cid) this.sql.exec('UPDATE members SET cid = ?, last_seen = ? WHERE anon_id = ? AND (cid IS NULL OR cid = "")', cid, now, anonId);
-      this.sql.exec('UPDATE members SET last_seen = ? WHERE anon_id = ?', now, anonId);
+      /* ★ 空串一律走**绑定参数**：SQLite 里 "" 是"双引号字符串"，
+       *   某些构建（DQS 关闭）会把它当**标识符**解析 → "no such column" → 整条 UPDATE 抛错。
+       *   写 '""' 字面量也不行：单引号会把 JS 字符串截断（这个我踩过，打包时才暴露）。 */
+      try{
+        if(cid) this.sql.exec('UPDATE members SET cid = ?, last_seen = ? WHERE anon_id = ? AND (cid IS NULL OR cid = ?)', cid, now, anonId, '');
+        this.sql.exec('UPDATE members SET last_seen = ? WHERE anon_id = ?', now, anonId);
+      }catch(e){ /* 同上：记账失败不阻断进房 */ }
       const token = await signToken({code:room.code, anon_id:anonId, exp:Math.floor(now / 1000) + TOKEN_TTL}, this.env.PIN_SECRET);
       return Response.json({token, anon_id:anonId, rule:room.rule});
     }
@@ -270,9 +298,16 @@ export class RoomDO extends DurableObject {
       server.serializeAttachment({anon_id:v.payload.anon_id, ts:Date.now()});
       /* ★ 有人连上就把巡检闹钟排上：不排的话 alarm 永远不响，半开连接没人清理。
        *   闹钟本来也负责每日清理，这里只是把它提前到 1 分钟后 —— 人走光后会自动退回 DAY。 */
-      this.ctx.storage.setAlarm(Date.now() + SWEEP_MS);
-      this.sql.exec('UPDATE members SET last_seen = ? WHERE anon_id = ?', Date.now(), v.payload.anon_id);
-      this.sql.exec('UPDATE room SET last_active = ? WHERE id = 1', Date.now());
+      /* ★★ 握手路径上的**附属操作一律不能抛** ★★
+       *   这里一旦抛异常，DO 返回 500 而不是 101 → 浏览器拿到关闭码 1006，
+       *   而用户看到的只是"连不上"，完全看不出是"服务端升级时顺手做的记录"失败了。
+       *   排闹钟、更新 last_seen / last_active 都只是记账，丢一次无所谓；
+       *   真正的准入校验（token / 房间号）在上面，绝不能包进 try。 */
+      try{
+        this.ctx.storage.setAlarm(Date.now() + SWEEP_MS);
+        this.sql.exec('UPDATE members SET last_seen = ? WHERE anon_id = ?', Date.now(), v.payload.anon_id);
+        this.sql.exec('UPDATE room SET last_active = ? WHERE id = 1', Date.now());
+      }catch(e){ /* 记账失败不影响进房 */ }
       return new Response(null, {status:101, webSocket:client});
     }
     return new Response('not found', {status:404});

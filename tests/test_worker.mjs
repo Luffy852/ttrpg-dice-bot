@@ -256,6 +256,89 @@ console.log('== 9. ★ 在线人数：room.js（DO）不能用裸 length（真�
     /storage\.countMsgs\(\)/.test(coreSrc) && !/msgCount\s*[:=]\s*room\.seq/.test(coreSrc));
 }
 
+console.log('== 10. ★★ 旧房间必须能打开：schema 迁移的顺序契约（2026-10-31 线上事故 · 房间 009950）==');
+/* 【事故】给 members 加 cid 列时，把 `CREATE INDEX ... ON members(cid)` 混在 SCHEMA 里、
+ *   ALTER 放在其后。对**已存在的旧房间**：CREATE TABLE IF NOT EXISTS 什么都不做 →
+ *   cid 列还不存在 → 建索引抛 "no such column: cid" → DO 构造函数崩
+ *   → 该房间任何请求 500、ws 握手拿不到 101（浏览器报 1006）。
+ *   新房间表是同批建的（自带 cid），自测全绿 —— 只有老房间炸，所以必须专门测。 */
+{
+  const roomSrc = fs.readFileSync(path.join(ROOT, 'apps', 'worker', 'src', 'room.js'), 'utf8');
+  const codeOnly = roomSrc.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  // ① 顺序：建表 → 迁移补列 → 建索引。索引绝不能出现在 TABLES 里（表建完列还不一定有）
+  const iTables = codeOnly.indexOf('TABLES.forEach');
+  const iAlter  = codeOnly.indexOf('ALTER TABLE members ADD COLUMN cid');
+  const iIndex  = codeOnly.indexOf('INDEXES.forEach');
+  ok('★ 建表在最前', iTables > 0 && iTables < iAlter, 'tables=' + iTables + ' alter=' + iAlter);
+  ok('★ 迁移在索引之前（★ 事故根因就是这个顺序）', iAlter > 0 && iAlter < iIndex, 'alter=' + iAlter + ' index=' + iIndex);
+  /* ★ 直接把 TABLES 数组抠出来查：正则跨行容易误判，抠字面量最稳 */
+  /* 抠到下一个顶层 `export const` / `export class` 为止（TABLES 数组以 `];` 收尾，
+   *   但注释里也出现 `];` 字样 —— 用"下一个顶层声明"当边界更稳） */
+  const tablesBlock = (/TABLES = \[([\s\S]*?)\n\];/.exec(codeOnly) || [])[1] || '';
+  ok('★ TABLES 里没有 CREATE INDEX（索引必须在迁移之后）', !/CREATE INDEX/.test(tablesBlock), tablesBlock.slice(0, 80));
+  ok('★ INDEXES 里才有索引', /CREATE INDEX IF NOT EXISTS idx_members_cid/.test(codeOnly));
+  // ② 索引创建失败不得致命（缺索引只是变慢，房间打不开才是灾难）
+  ok('★ 逐条建索引且吞掉异常', /INDEXES\.forEach\(s => \{ try\{/.test(codeOnly));
+  // ③ 握手 / 进房路径的"记账"操作不得阻断 —— 抛了就是 500 + 1006
+  ok('★ ws 握手的记账操作包了 try（排闹钟 / last_seen）', /记账失败不影响进房/.test(roomSrc));
+  ok('★ join 的 cid 找回失败会退化成新身份（不是 500）', /catch\(e\)\{ anonId = null; \}/.test(codeOnly));
+  ok('★ 准入校验没有被包进 try（token / 房间号照旧严格）',
+    /if\(!v\.ok\) return new Response\('bad token'/.test(codeOnly));
+  // ④ SQL 里不许出现双引号空串（DQS 关闭的构建会把它当标识符 → no such column）
+  const naked = roomSrc.match(/cid = ""/g) || [];
+  ok('★ 没有裸的双引号空串（DQS 歧义）', naked.length === 0, '残留 ' + naked.length + ' 处');
+}
+
+console.log('== 11. ★ 真跑一遍"旧库 → 新代码"的迁移序列（sql.js，不是静态断言）==');
+{
+  /* sql.js 在沙盒里装在自定义 NODE_PATH 下，ESM 的 import 解析不到 —— 走 require。
+   * （tests/sqlite_storage.mjs 那边由调用方注入 db，这里要自己造一个旧库，只能自己载。） */
+  const initSqlJs = (await import('node:module')).createRequire(import.meta.url)('sql.js');
+  const SQL = await initSqlJs();
+  const db = new SQL.Database();
+  /* 先造一个**本次部署之前**就存在的库：members 没有 cid 列，
+     其余表与现行 schema 一致（模拟线上那个跑了很久的 009950）。 */
+  db.run(`CREATE TABLE IF NOT EXISTS members (
+     anon_id TEXT PRIMARY KEY, nick TEXT NOT NULL, joined_at INTEGER NOT NULL,
+     last_seen INTEGER NOT NULL, msg_count INTEGER NOT NULL DEFAULT 0)`);
+  db.run("INSERT INTO members VALUES ('a1', '战斗菇', 1, 1, 3)");
+  db.run(`CREATE TABLE IF NOT EXISTS messages (seq INTEGER PRIMARY KEY, id TEXT, ts INTEGER, kind TEXT,
+     from_name TEXT, actor TEXT, anon_id TEXT, req_id TEXT, rule_at TEXT, payload TEXT)`);
+  db.run("INSERT INTO messages VALUES (1, 'm1', 1, 'chat', '战斗菇', '战斗菇', 'a1', NULL, 'coc7', '{\"text\":\"老消息\"}')");
+
+  // 现行代码的三步：TABLES → ALTER → INDEXES
+  const TABLES = [
+    `CREATE TABLE IF NOT EXISTS members (
+       anon_id TEXT PRIMARY KEY, cid TEXT, nick TEXT NOT NULL, joined_at INTEGER NOT NULL,
+       last_seen INTEGER NOT NULL, msg_count INTEGER NOT NULL DEFAULT 0)`,
+    `CREATE TABLE IF NOT EXISTS messages (seq INTEGER PRIMARY KEY, id TEXT, ts INTEGER, kind TEXT,
+       from_name TEXT, actor TEXT, anon_id TEXT, req_id TEXT, rule_at TEXT, payload TEXT)`,
+  ];
+  const INDEXES = ['CREATE INDEX IF NOT EXISTS idx_members_cid ON members(cid)'];
+  let err = null;
+  try{
+    TABLES.forEach(s => db.run(s));
+    try{ db.run('ALTER TABLE members ADD COLUMN cid TEXT'); }catch(e){ /* 列已存在 */ }
+    INDEXES.forEach(s => { try{ db.run(s); }catch(e){} });
+  }catch(e){ err = e; }
+  eq('★ 旧库跑完整个迁移序列不抛异常', err, null);
+  // 旧数据还在（迁移绝不能清空房间）
+  const rows = db.exec("SELECT nick FROM members WHERE anon_id = 'a1'");
+  ok('★ 老成员还在（迁移没清库）', rows.length > 0 && rows[0].values[0][0] === '战斗菇');
+  const msgs = db.exec('SELECT payload FROM messages WHERE seq = 1');
+  ok('★ 老消息还在', msgs.length > 0 && /老消息/.test(String(msgs[0].values[0][0])));
+  // 新列真的可用（否则 cid 身份找回形同虚设）
+  let werr = null;
+  try{ db.run('UPDATE members SET cid = ? WHERE anon_id = ?', ['cid-abc', 'a1']); }catch(e){ werr = e; }
+  eq('★ cid 列真的可写（迁移生效了）', werr, null);
+  const got = db.exec("SELECT cid FROM members WHERE anon_id = 'a1'");
+  eq('★ 能按 cid 查回老身份', got[0].values[0][0], 'cid-abc');
+  // 空串判断用绑定参数：验证这样写不会被当成标识符
+  let qerr = null;
+  try{ db.run('UPDATE members SET cid = ?, last_seen = ? WHERE anon_id = ? AND (cid IS NULL OR cid = ?)', ['cid-abc', 2, 'a1', '']); }catch(e){ qerr = e; }
+  eq('★ 绑定参数写空串也能正常执行（无 DQS 歧义）', qerr, null);
+}
+
 console.log('---------------------------');
 console.log('Worker 纯逻辑：通过 ' + pass + ' 项，失败 ' + fail + ' 项');
 console.log('⚠️  未验（只能你部署后验）：room.js 的 DO 行为 / index.js 路由 / wrangler 配置 / 真实 ws');
