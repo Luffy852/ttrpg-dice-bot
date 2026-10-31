@@ -16,6 +16,26 @@ const store = {
   set(k, v){ try{ sessionStorage.setItem(k, v); }catch(e){} },
   del(k){ try{ sessionStorage.removeItem(k); }catch(e){} },
 };
+/* ★ 长期身份键（真机反馈 · B 组）★
+ * 【问题】关掉页面再进来，服务端现发一个新的 anon_id —— 角色卡、昵称全丢，
+ *   玩家以为"绑了却读不出来"。而跑团一次 2–4 小时，中途切出去再回来很常见。
+ * 【做法】本机 localStorage 存一个 cid，每次 /join 带上；服务端按它找回同一个 anon_id。
+ * 【为什么是 localStorage 而不是 sessionStorage】sessionStorage 关标签页就清，
+ *   解决不了"关页重进"。cid 只在本机、不含任何个人信息，换设备仍然是新身份。
+ * 【与 PIN 的关系】PIN 校验在服务端先过，不知道 PIN 的人拿不到 token，
+ *   也就无从用 cid 恢复身份 —— 防误入口径没有变松。 */
+const CID_KEY = 'db:cid';
+function myCid(){
+  try{
+    let c = localStorage.getItem(CID_KEY);
+    if(!c){
+      c = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(36).slice(2))
+        .replace(/[^A-Za-z0-9_-]/g, '');
+      localStorage.setItem(CID_KEY, c);
+    }
+    return c;
+  }catch(e){ return ''; }      // 隐私模式下 localStorage 可能不可写 → 退化为"每次新身份"，不报错
+}
 const api = async (path, body) => {
   const r = await fetch(path, body ? {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify(body)} : undefined);
   const j = await r.json().catch(() => ({}));
@@ -52,6 +72,9 @@ function enter(r){
     },
   });
   ui.setMe(r.nick);
+  /* ★ 上翻加载：UI 滚到顶时回调这里，向服务端要这一页更早的消息。
+   *   锚点是"当前已渲染的最小 seq"（不是 cursor —— cursor 是最新水位）。 */
+  ui.onLoadOlder(oldestSeq => { net.history(oldestSeq); });
   net = createNet({
     code:r.code, token:r.token, nick:r.nick,
     on:{
@@ -67,7 +90,20 @@ function enter(r){
         ui.failAll && ui.failAll('未送达');
       },
       welcome(f){ ui.setRoom(f.room); ui.setMe(f.you.nick); ui.setMembers(f.members, f.online, f.total); },
-      batch(msgs){ msgs.forEach(m => ui.append(m)); },
+      /* ★ 三种 batch 走三条路：
+       *   first = 首屏（最近 200 条）→ 记下分页锚点；page = 上翻 → 插到顶部；live = 广播 → 追加到底。
+       *   不分清的话，上翻拿到的历史会被当成新消息追加到**底部** —— 顺序全乱。 */
+      batch(msgs, cursor, hasMore, info){
+        const w = (info && info.why) || 'live';
+        if(w === 'page'){
+          ui.prepend(msgs);
+          ui.doneLoadingOlder(!!(info && info.hasMoreOlder));
+          ui.setPaging(info && info.oldest, info && info.hasMoreOlder, null);
+        }else{
+          msgs.forEach(m => ui.append(m));
+          if(w === 'first') ui.setPaging(info && info.oldest, info && info.hasMore, info && info.total);
+        }
+      },
       state(s){ ui.setRoom(s); },                    // ★ 以后端为准回写，不乐观更新
       presence(list, online, total){ ui.setMembers(list, online, total); },
       ack(){ /* 真实消息由 batch 到达；占位气泡到那时才移除 */ },
@@ -94,7 +130,7 @@ function enter(r){
 }
 
 async function doJoin(code, nick, pin){
-  const j = await api('/api/room/' + code + '/join', {nick, pin:pin || undefined});
+  const j = await api('/api/room/' + code + '/join', {nick, pin:pin || undefined, cid:myCid()});
   store.set('db:room:' + code, JSON.stringify({token:j.token, nick}));
   enter({code, token:j.token, nick});
 }

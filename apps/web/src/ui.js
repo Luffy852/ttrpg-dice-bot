@@ -34,30 +34,24 @@ export function createUI({code, onSubmit, onExport}){
     if(!a || a === '骰娘') return '';
     return '<span class="re' + (a === st.me ? ' me' : '') + '">→ ' + Engine.esc(a) + '</span>';
   }
+  /* ★ 渲染一条消息，返回 HTML（append 与 prepend 共用，不写两遍 —— 原则 4） */
+  function htmlOf(m){
+    if(m.kind === 'sys' || m.kind === 'notice') return Engine.renderMsg(toRenderable(m));
+    const mine = (m.from && m.from !== '骰娘' && m.from === st.me);
+    return '<div class="msg' + (mine ? ' me' : '') + '">' +
+      '<div class="av">' + Engine.esc((m.from || '?').slice(0, 1)) + '</div>' +
+      '<div class="body"><div class="who">' + Engine.esc(m.from || '?') + replyTag(m) +
+      '<span class="ts">' + hhmm(m.ts) + '</span></div>' +
+      Engine.renderMsg(toRenderable(m)) + '</div></div>';
+  }
+
   function append(m){
     if(seen.has(m.id)) return false;       // ★ msg_id 去重
     seen.add(m.id);
     /* 新消息使总数 +1；补齐的历史（seq ≤ 进房时的游标）已在 msgTotal 里，不加 */
     if(st.msgTotal != null && m.seq > st.seqAtWelcome) st.msgTotal++;
     if(m.req_id && pending.has(m.req_id)){ pending.get(m.req_id).remove(); pending.delete(m.req_id); }
-    const mine = (m.from && m.from !== '骰娘' && m.from === st.me);
-    if(m.kind === 'sys' || m.kind === 'notice'){
-      $stream.insertAdjacentHTML('beforeend', Engine.renderMsg(toRenderable(m)));
-    }else{
-      const wrap = document.createElement('div');
-      wrap.className = 'msg' + (mine ? ' me' : '');
-      wrap.innerHTML =
-        '<div class="av">' + Engine.esc((m.from || '?').slice(0, 1)) + '</div>' +
-        '<div class="body"><div class="who">' + Engine.esc(m.from || '?') +
-        /* ★ 骰娘的回复必须写明「回应谁」—— 多人房间里一串「骰娘」气泡分不清是谁的指令
-         *   换来的结果（真机反馈：UncleMush 未绑卡时的 .st 回复、普通 .r 都一样）。
-         *   actor 是服务端落库时就写好的发起人（core.js：actor = m.actor || nick），
-         *   广播与补齐两条链路都带它 —— 这里只是把它显示出来，不加任何新字段。 */
-        replyTag(m) +
-        '<span class="ts">' + hhmm(m.ts) + '</span></div>' +
-        Engine.renderMsg(toRenderable(m)) + '</div>';
-      $stream.appendChild(wrap);
-    }
+    $stream.insertAdjacentHTML('beforeend', htmlOf(m));   // ★ 与 prepend 同一份渲染（原则 4）
     toBottom();
     refreshTop();
     return true;
@@ -87,7 +81,66 @@ export function createUI({code, onSubmit, onExport}){
     });
   }
 
+  /** ★ 把更早的一页插到**顶部**（真机反馈 · C 组）
+   * 【为什么必须保持滚动位置】往上插内容会把可视区往下顶，用户正看着的那条会瞬间跳走 ——
+   *   手机上尤其明显。做法：先记插入前的 scrollHeight，插完把差值补回 scrollTop。
+   * 【为什么不去重 seen】历史页的消息客户端没渲染过，seen 里没有；插完要登记，
+   *   否则之后 ws 又广播同一条（幂等回放）会重复渲染。 */
+  function prepend(msgs){
+    const before = $stream.scrollHeight, top = $stream.scrollTop;
+    let n = 0;
+    msgs.forEach(m => {
+      if(seen.has(m.id)) return;
+      seen.add(m.id); n++;
+      $stream.insertAdjacentHTML('afterbegin', htmlOf(m));
+    });
+    if(n) $stream.scrollTop = top + ($stream.scrollHeight - before);   // ★ 位置保持
+    refreshTop();
+    return n;
+  }
+
   function toBottom(){ $stream.scrollTop = $stream.scrollHeight; }
+
+  /* ★ 滚到顶自动加载更早的消息（用户已定方案）
+   *  【阈值为什么是 60px】手指"滚到底"不会精确到 0；太小会漏触发，太大会在正常阅读时误触发。
+   *  【loading 锁】一次只发一个请求，回来前不重复发 —— 否则一屏能连发十几页。 */
+  const LOAD_TOP = 60;
+  let oldestSeq = null, hasMoreOlder = false, loading = false;
+  function onLoadOlder(fn){ loadOlder = fn; }
+  let loadOlder = null;
+  function setPaging(oldest, more, total){
+    if(oldest != null) oldestSeq = (oldestSeq == null ? oldest : Math.min(oldestSeq, oldest));
+    if(more != null) hasMoreOlder = !!more;
+    if(total != null) st.msgTotal = total;
+    refreshTop();
+  }
+  function maybeLoadOlder(){
+    if(loading || !hasMoreOlder || oldestSeq == null || !loadOlder) return;
+    if($stream.scrollTop > LOAD_TOP) return;
+    loading = true;
+    showLoadingTop(true);
+    loadOlder(oldestSeq);
+  }
+  function doneLoadingOlder(more){
+    loading = false;
+    hasMoreOlder = !!more;
+    showLoadingTop(false);
+    refreshTop();
+  }
+  /** 顶部的"正在加载更早…"提示条：插在消息最上方，加载完移除 */
+  let $loadingTop = null;
+  function showLoadingTop(on){
+    if(on){
+      if($loadingTop) return;
+      $loadingTop = document.createElement('div');
+      $loadingTop.className = 'notice loadmore';
+      $loadingTop.textContent = '正在加载更早的消息…';
+      $stream.insertBefore($loadingTop, $stream.firstChild);
+    }else if($loadingTop){
+      $loadingTop.remove(); $loadingTop = null;
+    }
+  }
+  $stream.addEventListener('scroll', () => { maybeLoadOlder(); }, {passive:true});
 
   function refreshTop(){
     const rm = Engine.RULE_META[st.rule] || Engine.RULE_META.generic;
@@ -142,7 +195,8 @@ export function createUI({code, onSubmit, onExport}){
   $input.addEventListener('blur', fit);
 
   return {
-    append, appendPending, failPending, failAll, refreshTop, toBottom,
+    append, prepend, appendPending, failPending, failAll, refreshTop, toBottom,
+    setPaging, doneLoadingOlder, onLoadOlder,
     setRoom(r){
       if(r.rule) st.rule = r.rule;
       if(r.baredice != null) st.baredice = !!r.baredice;

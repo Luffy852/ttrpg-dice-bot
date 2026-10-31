@@ -20,6 +20,8 @@ export function createMemoryStorage(code){
     async allocSeq(n){ const base = room.seq + 1; room.seq += n; return base; },   // ★ seq 从 1 开始：cursor=0 = 首屏
     async getCard(a){ return cards.get(a) || null; },
     async setCard(a, card){ cards.set(a, JSON.parse(JSON.stringify(card))); },
+    /* ★ 解绑 = 真删（.st clear）；不删的话下次 .st 又从库里读回来，卡会"复活" */
+    async delCard(a){ cards.delete(a); },
     async setNick(a, n){ nicks.set(a, n); },
     async getIdem(reqId){ return idem.get(reqId) || null; },
     async putIdem(reqId, seq, ts){ idem.set(reqId, {req_id:reqId, seq, ts}); },
@@ -37,6 +39,7 @@ export function createMemoryStorage(code){
     async since(cursor, limit){
       return msgs.filter(m => m.seq > cursor).slice(0, limit);   // ★ cursor = 已渲染的最大 seq，补齐是它之后
     },
+    async recent(limit){ return msgs.slice(-(limit || 200)); },   // 最近 N 条
     async history(beforeSeq, limit){
       return msgs.filter(m => m.seq < beforeSeq).slice(-limit);
     },

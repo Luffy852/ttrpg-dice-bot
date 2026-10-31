@@ -14,6 +14,9 @@
  *   所以"服务端权威掷骰"这部分不需要 Cloudflare 也能真跑真断言。
  *   ws / DO 的 IO 胶水层仍然只能由你真机部署后验 —— 别混为一谈。
  * ========================================================================== */
+import fs from 'node:fs';
+import path from 'node:path';
+import {fileURLToPath} from 'node:url';
 import * as Engine from '../packages/engine/src/index.js';
 import {createRoomCore} from '../apps/worker/src/core.js';
 import {createMemoryStorage} from './memory_storage.mjs';
@@ -21,6 +24,7 @@ import {checkIn, IN, ERR} from '../packages/protocol/src/frames.js';
 import {checkPayload, KIND, checkText, LIMITS} from '../packages/protocol/src/payload.js';
 import {dedupe, gapOf, msgId, backoff, tokenBucket, cursorOf} from '../packages/protocol/src/cursor.js';
 
+const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 let pass = 0, fail = 0;
 const ok = (n, c, extra) => { if(c) pass++; else { fail++; console.log('  ❌ ' + n + (extra ? ' :: ' + extra : '')); } };
 const eq = (n, a, b) => ok(n, a === b, 'got=' + JSON.stringify(a) + ' want=' + JSON.stringify(b));
@@ -271,6 +275,154 @@ console.log('== 11. ★ presence / welcome 帧带 online 与 total（两个数�
   // 服务端没给时退化为名单长度，不会 undefined（前端顶栏不会显示 NaN）
   eq('★ 缺省退化：total = 名单长度', presence(mem).total, 3);
   eq('★ 缺省退化：online = 0 而不是 undefined', presence(mem).online, 0);
+}
+
+console.log('== 12. ★ .st clear 必须真的删库（真机反馈 · B 组第 2 条）==');
+{
+  const st = createMemoryStorage('CLR001');
+  let t = 1772000000000;
+  const core = createRoomCore(st, {now: () => (t += 100)});
+  const run3 = (reqId, text) => core.apply({reqId, text, anonId:'a1', nick:'战斗菇'});
+  await run3('c1', '.set rule dnd');
+  await run3('c2', '.st set 力量 16 敏捷 14 体质 15 智力 10 感知 12 魅力 8 等级 1');
+  ok('★ 绑卡后库里真有卡', !!(await st.getCard('a1')));
+  const r = await run3('c3', '.st clear');
+  ok('提示已解绑', r.msgs.some(m => m.kind === 'notice' && /已解绑/.test(String(m.html || m.payload && m.payload.html || ''))),
+    JSON.stringify(r.msgs.map(m => m.kind)));
+  eq('★ 解绑后库里的卡真的没了（不是只改内存）', await st.getCard('a1'), null);
+  // 关键回归：clear 之后再 .st，必须给模板（未绑定），不能把旧卡读回来
+  const r2 = await run3('c4', '.st');
+  const html = String(Engine.defsHtml(r2.msgs.find(m => m.kind === 'html').payload.defs));
+  ok('★ clear 后再 .st 给的是模板，不是旧卡', /尚未绑定/.test(html), html.slice(0, 120));
+  eq('★ 旧卡的数值不再出现', /力量/.test(html) === false || /尚未绑定/.test(html), true);
+  // 别人的 clear 不能动我的卡（匿名作用域）
+  const st2 = createMemoryStorage('CLR002');
+  const core2 = createRoomCore(st2, {now: () => (t += 100)});
+  await core2.apply({reqId:'d1', text:'.set rule coc', anonId:'a1', nick:'战斗菇'});
+  await core2.apply({reqId:'d2', text:'.st set 侦查 60', anonId:'a1', nick:'战斗菇'});
+  await core2.apply({reqId:'d3', text:'.st clear', anonId:'a2', nick:'Bob'});
+  ok('★ 别人解绑不影响我的卡', !!(await st2.getCard('a1')));
+}
+
+console.log('== 13. ★ 身份找回：同一 cid 必须拿回同一个 anon_id（真机反馈 · B 组第 3 条）==');
+{
+  const roomSrc = fs.readFileSync(path.join(ROOT, 'apps', 'worker', 'src', 'room.js'), 'utf8');
+  const mainSrc = fs.readFileSync(path.join(ROOT, 'apps', 'web', 'src', 'main.js'), 'utf8');
+  // ① join 必须按 cid 查回老身份，而不是无条件 randomUUID
+  ok('★ /join 会按 cid 找回老 anon_id', /SELECT anon_id FROM members WHERE cid = \?/.test(roomSrc));
+  ok('★ 找不到 cid 时才新建身份', /crypto\.randomUUID\(\)/.test(roomSrc) && /if\(!anonId\)/.test(roomSrc));
+  // ② cid 必须做格式校验：它是从客户端来的，不能原样拼进 SQL 语义之外的东西
+  ok('★ cid 有格式校验（非法即视为没有）', /A-Za-z0-9_-\]\{8,64\}/.test(roomSrc));
+  // ③ 旧库迁移：CREATE TABLE IF NOT EXISTS 改不动已存在的表
+  ok('★ 有 ALTER TABLE 迁移（老房间也能长出 cid 列）', /ALTER TABLE members ADD COLUMN cid/.test(roomSrc));
+  ok('★ 迁移是幂等的（列已存在要吞掉错）', /try\{[^}]*ALTER TABLE members ADD COLUMN cid[^}]*\}catch/.test(roomSrc.replace(/\s+/g, ' ')) || /catch\(e\)\{ \/\* 列已存在/.test(roomSrc));
+  /* ④ ★ 网关转发不能漏字段（这条是端到端真跑才发现的：DO 侧逻辑全对，
+   *   但 Worker 只转了 {nick, pin}，cid 在网关被丢掉 —— 静态看 room.js 永远是"对的"）。
+   *   凡是"前端 → Worker → DO"的转发，字段清单必须与消费端一致。 */
+  const idxSrc = fs.readFileSync(path.join(ROOT, 'apps', 'worker', 'src', 'index.js'), 'utf8');
+  ok('★ Worker 转发 /join 时带上了 cid', /cid:b\.cid/.test(idxSrc), 'index.js 的 /join 转发');
+  // ⑤ 前端必须用 localStorage（sessionStorage 关页即清，解决不了"关页重进"）
+  ok('★ cid 存在 localStorage（不是 sessionStorage）', /localStorage\.setItem\(CID_KEY/.test(mainSrc));
+  ok('★ /join 带上 cid', /cid:myCid\(\)/.test(mainSrc));
+  ok('★ localStorage 不可写时退化为新身份，不报错', /catch\(e\)\{ return ''; \}/.test(mainSrc));
+  // ⑤ schema.sql 与 room.js 必须同步（唯一出处原则）
+  const ddl = fs.readFileSync(path.join(ROOT, 'apps', 'worker', 'src', 'schema.sql'), 'utf8');
+  ok('★ schema.sql 里也有 cid 列（唯一出处）', /cid\s+TEXT/.test(ddl));
+  ok('★ 索引名两处一致', /idx_members_cid/.test(ddl) && /idx_members_cid/.test(roomSrc));
+}
+
+console.log('== 14. ★ 半开连接要被巡检清掉（真机反馈 · B 组第 1 条）==');
+{
+  const roomSrc = fs.readFileSync(path.join(ROOT, 'apps', 'worker', 'src', 'room.js'), 'utf8');
+  const codeOnly = roomSrc.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  ok('★ 有"最后一次收到帧"的记录（attachment 带 ts）', /serializeAttachment\(\{anon_id:v\.payload\.anon_id, ts:Date\.now\(\)\}/.test(codeOnly));
+  ok('★ 收到任何帧都刷新 ts（心跳也算活着）', /serializeAttachment\(Object\.assign\(\{\}, att, \{ts:Date\.now\(\)\}\)\)/.test(codeOnly));
+  ok('★ 有巡检函数 sweepIdle', /sweepIdle\(\)/.test(codeOnly));
+  ok('★ 巡检按 IDLE_MS 判超时并主动 close', /now - last > IDLE_MS/.test(codeOnly) && /ws\.close\(4000/.test(codeOnly));
+  ok('★ 关掉后广播 presence（人数让所有人看到回落）', /if\(!stale\.length\) return 0;/.test(codeOnly) && /online:all\.length - stale\.length/.test(codeOnly));
+  /* ★ 存活数必须自己减，不能信 onlineCount()：实测 ws.close() 后 readyState 不立刻翻转，
+   *   那一刻 onlineCount() 还是旧值 —— 广播出去等于没回落（真机"永远多一个"的变体）。 */
+  ok('★ 存活数用"总数 − 本次关闭数"，不用 onlineCount()', !/online:this\.onlineCount\(\), total:mem\.length\}\);\s*\n?\s*\}/.test(codeOnly) && /all\.length - stale\.length/.test(codeOnly));
+  // ★ 排程：不排闹钟 = 巡检永远不跑（这是最容易漏的一环）
+  ok('★ 建连时排上巡检闹钟', /setAlarm\(Date\.now\(\) \+ SWEEP_MS\)/.test(codeOnly));
+  ok('★ 有人就继续巡、没人退回每日清理', /setAlarm\(this\.onlineCount\(\) > 0 \? now \+ SWEEP_MS : now \+ DAY\)/.test(codeOnly));
+  ok('★ 在线数仍按 readyState 过滤（两条机制叠加，不互相替代）', /readyState\s*===\s*1/.test(codeOnly));
+  // 口径：用户定 3 分钟，且心跳 20s 必须远小于它（否则会误伤挂机的人）
+  const idle = Number((/const IDLE_MS\s*=\s*([^;]+)/.exec(codeOnly) || [])[1] ? eval((/const IDLE_MS\s*=\s*([^;]+)/.exec(codeOnly) || [])[1]) : 0);
+  const hb = Number((/HB_MS\s*=\s*(\d+)/.exec(fs.readFileSync(path.join(ROOT, 'apps', 'web', 'src', 'net.js'), 'utf8')) || [])[1]);
+  ok('★ IDLE_MS = 3 分钟（用户已定）', idle === 180000, String(idle));
+  ok('★ 心跳间隔远小于离线阈值（≥4 倍余量，不会误伤挂机）', hb > 0 && idle / hb >= 4, 'hb=' + hb + ' idle=' + idle);
+}
+
+console.log('== 15. ★ 首屏必须取「最近」不是「最早」（真机反馈 · C 组）==');
+{
+  /* 【坑】刷新时客户端 cursor 归 0 → since(0) 拿到**最早** 200 条。
+   *   房间超过 200 条后刷新，看到的永远是开头那一段，后面的消息再也出不来
+   *   （没有上滚加载就永远看不到，而导出是全量 —— 用户会以为消息丢了）。
+   *   不刷新时走 ws 增量，所以只在"刷新/重进"时出现，是最难发现的一类 bug。 */
+  const st = createMemoryStorage('HIS001');
+  let t = 1772000000000;
+  /* ★ 每条之间推进 1 秒：限流是令牌桶（10 个 / 每秒回 5 个），
+   *   时间不走的话 260 条里绝大部分会被 rate_limited 丢掉 ——
+   *   那时"260 条"的断言会静默失败，后面的断言全在空数据上跑，看不出真实问题。 */
+  const core = createRoomCore(st, {now: () => (t += 1000)});
+  for(let i = 0; i < 260; i++){
+    const r = await core.apply({reqId:'m' + i, text:'第' + i + '条', anonId:'a1', nick:'老王'});
+    if(r.reject) throw new Error('第 ' + i + ' 条被限流，测试时钟要再放慢');
+  }
+  const all = st._all();
+  eq('库里共 260 条', all.length, 260);
+
+  const first = await core.recent(200);
+  eq('★ 首屏取 200 条', first.msgs.length, 200);
+  eq('★ 首屏第一条是第 60 条（不是第 0 条）', /第60条/.test(first.msgs[0].payload.text), true);
+  eq('★ 首屏最后一条是最新那条', /第259条/.test(first.msgs[first.msgs.length - 1].payload.text), true);
+  ok('★ 首屏标了 has_more（还有更早的）', first.has_more === true, String(first.has_more));
+  eq('★ total 是房间总条数（不只是本页）', first.total, 260);
+  // 对照：since(0) 拿的是最早那批 —— 正是 bug 的形态，锁住它别再回来
+  const wrong = await core.since(0, 200);
+  eq('★ since(0) 拿到的是最早一批（首屏不能用它）', /第0条/.test(wrong.msgs[0].payload.text), true);
+
+  // 上翻：锚点是本页最小 seq，取它之前的
+  const page = (await core.history(first.msgs[0].seq, 200)).msgs;
+  eq('★ 上翻取到 60 条（更早就没了）', page.length, 60);
+  eq('★ 上翻第一条是最早那条', /第0条/.test(page[0].payload.text), true);
+  eq('★ 上翻最后一条紧接首屏第一条', page[page.length - 1].seq < first.msgs[0].seq, true);
+  // 不重叠：上翻结果与首屏没有交集（否则会重复渲染）
+  const s1 = new Set(first.msgs.map(m => m.seq));
+  eq('★ 上翻与首屏不重叠', page.some(m => s1.has(m.seq)), false);
+  // 到顶：再往上翻一页是空的
+  eq('★ 翻到顶了就没有更早的', (await core.history(page[0].seq, 200)).msgs.length, 0);
+}
+
+console.log('== 16. ★ 上翻分页的接线（服务端 why 标记 + 前端三条路）==');
+{
+  const roomSrc = fs.readFileSync(path.join(ROOT, 'apps', 'worker', 'src', 'room.js'), 'utf8');
+  const netSrc  = fs.readFileSync(path.join(ROOT, 'apps', 'web', 'src', 'net.js'), 'utf8');
+  const mainSrc = fs.readFileSync(path.join(ROOT, 'apps', 'web', 'src', 'main.js'), 'utf8');
+  const uiSrc   = fs.readFileSync(path.join(ROOT, 'apps', 'web', 'src', 'ui.js'), 'utf8');
+  /* ★ why 必须显式带：靠"oldest < cursor"去猜是分不出来的 ——
+   *   首屏那批本身就是 200 条连续段，oldest 当然小于末尾，会被误判成"上翻的历史"，
+   *   于是首屏不推进 cursor，重连反而漏掉中间段。 */
+  ok('★ 首屏批次带 why:first', /why:'first'/.test(roomSrc));
+  /* ★ 光有 recent() 不够 —— HELLO 里必须真的用它。
+   *   core.recent 存在但接线写成 since(0)，首屏就还是"最早 200 条"，
+   *   单测 recent() 照样全绿。凡是"函数有了 ≠ 用上了"的地方都要锁调用点。 */
+  ok('★ HELLO 首屏真的调用 recent（不是 since(0)）',
+    /fresh \? await this\.core\.recent\(200\)/.test(roomSrc.replace(/\/\*[\s\S]*?\*\//g, '')), 'room.js 的 HELLO 分支');
+  ok('★ 上翻批次带 why:page', /why:'page'/.test(roomSrc));
+  ok('★ 上翻帧带 has_more（翻到底要能停）', /has_more:r\.msgs\.length >= \(f\.limit \|\| 200\)/.test(roomSrc));
+  // 前端：历史帧不能推进 cursor（cursor 是"最新水位"，推进了重连会漏）
+  ok('★ 上翻不推进 cursor', /if\(!isHistory\) cursor = Math\.max/.test(netSrc) && /f\.why === 'page'/.test(netSrc));
+  ok('★ 前端按 why 分三条路（page 插顶部，其余追加）', /w === 'page'/.test(mainSrc) && /ui\.prepend/.test(mainSrc) && /ui\.append/.test(mainSrc));
+  // UI：插顶部必须保持滚动位置，否则手机上会跳
+  ok('★ 上翻插在顶部（afterbegin）', /insertAdjacentHTML\('afterbegin'/.test(uiSrc));
+  ok('★ 插完补回 scrollTop（不跳动）', /scrollTop = top \+ \(\$stream\.scrollHeight - before\)/.test(uiSrc));
+  ok('★ 有 loading 锁（一次只发一页）', /if\(loading/.test(uiSrc) && /loading = true/.test(uiSrc));
+  ok('★ 滚到顶触发（阈值 60px，手指不会精确到 0）', /LOAD_TOP = 60/.test(uiSrc) && /scrollTop > LOAD_TOP/.test(uiSrc));
+  ok('★ 上翻也登记 seen（防之后广播重复渲染）', /seen\.add\(m\.id\); n\+\+/.test(uiSrc));
+  // 渲染只有一份（原则 4）：append 与 prepend 共用 htmlOf
+  ok('★ 追加与插入共用同一个渲染函数', /function htmlOf/.test(uiSrc) && (uiSrc.match(/Engine\.renderMsg\(toRenderable\(m\)\)/g) || []).length <= 2);
 }
 
 console.log('---------------------------');

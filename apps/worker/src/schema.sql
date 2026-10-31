@@ -13,6 +13,10 @@
 
 PRAGMA journal_mode = WAL;
 
+-- ★ 旧库迁移（room.js 构造时执行，幂等）：
+--   ALTER TABLE members ADD COLUMN cid TEXT;   -- 已存在的表不会被 CREATE TABLE IF NOT EXISTS 改到
+--   CREATE INDEX IF NOT EXISTS idx_members_cid ON members(cid);
+
 -- 房间元信息（单行：一个 DO = 一个房间，不需要多表 JOIN）
 CREATE TABLE IF NOT EXISTS room (
   id           INTEGER PRIMARY KEY CHECK (id = 1),
@@ -32,6 +36,7 @@ CREATE TABLE IF NOT EXISTS room (
 -- 成员（房间内作用域；anon_id 由服务端签发）
 CREATE TABLE IF NOT EXISTS members (
   anon_id     TEXT PRIMARY KEY,
+  cid         TEXT,                       -- 客户端长期身份键（localStorage）；服务端按它找回同一个 anon_id
   nick        TEXT NOT NULL,
   joined_at   INTEGER NOT NULL,
   last_seen   INTEGER NOT NULL,

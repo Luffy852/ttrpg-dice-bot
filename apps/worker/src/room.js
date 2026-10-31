@@ -21,6 +21,13 @@ import {exportAs, FORMAT} from './export.js';
 import {verifyToken, verifyPin, newSalt, hashPin, signToken, TOKEN_TTL} from './auth.js';
 
 const DAY = 86400000;
+/* ★ 离线判定（真机反馈 · B 组）：手机息屏后 ws 常常**收不到关闭帧** ——
+ *   系统直接掐掉网络，服务端那条连接在自己看来仍是 OPEN（半开连接）。
+ *   于是人已经走了、在线数还挂着 1，次数一多就累积成"永远多一个人"。
+ * 【做法】每条 ws 在 attachment 上记最后一次收到帧的时间；巡检超过 IDLE_MS 就主动关掉。
+ * 【为什么是 3 分钟】前端每 20 秒发一次心跳，留 9 倍余量 —— 弱网重传不会误伤挂机的人。 */
+const IDLE_MS  = 3 * 60 * 1000;
+const SWEEP_MS = 60 * 1000;        // 巡检间隔：小于 IDLE_MS 太多会白跑，大于会延迟回落
 const KEEP_DAYS = 30;          // 房间消息留存
 const WARN_DAYS = 23;          // 到期前 7 天提醒（档案：清理动作必须告知，不能静默）
 
@@ -32,9 +39,16 @@ export const SCHEMA = [
      last_active INTEGER NOT NULL, rule TEXT NOT NULL DEFAULT 'generic', baredice INTEGER NOT NULL DEFAULT 0,
      rule_set_by TEXT, rule_set_at INTEGER, pin_hmac TEXT, pin_salt TEXT,
      seq INTEGER NOT NULL DEFAULT 0, notified_clean INTEGER NOT NULL DEFAULT 0, ver INTEGER NOT NULL DEFAULT 1)`,
+  /* ★ cid = 客户端长期身份键（2026-10-31 真机反馈 · B 组）
+   *   以前每次 /join 都现发一个随机 anon_id —— 关页重进就是"另一个人"，
+   *   角色卡、昵称全部丢失。现在客户端在浏览器本地存一个 cid（见 apps/web/src/main.js），
+   *   /join 带上它；服务端按 cid 找回同一个 anon_id（卡与昵称跟着回来）。
+   *   【为什么 cid 与 anon_id 要分开】anon_id 会写进消息表与导出战报，
+   *   是"房间内的稳定标识"；cid 是"这台浏览器"的凭据，不该进消息。 */
   `CREATE TABLE IF NOT EXISTS members (
-     anon_id TEXT PRIMARY KEY, nick TEXT NOT NULL, joined_at INTEGER NOT NULL,
+     anon_id TEXT PRIMARY KEY, cid TEXT, nick TEXT NOT NULL, joined_at INTEGER NOT NULL,
      last_seen INTEGER NOT NULL, msg_count INTEGER NOT NULL DEFAULT 0)`,
+  `CREATE INDEX IF NOT EXISTS idx_members_cid ON members(cid)`,
   `CREATE TABLE IF NOT EXISTS messages (
      seq INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, ts INTEGER NOT NULL, kind TEXT NOT NULL,
      from_name TEXT NOT NULL, actor TEXT, anon_id TEXT, req_id TEXT, rule_at TEXT, payload TEXT NOT NULL)`,
@@ -52,6 +66,12 @@ export class RoomDO extends DurableObject {
     super(ctx, env);
     this.ctx = ctx; this.env = env; this.sql = ctx.storage.sql;
     SCHEMA.forEach(s => this.sql.exec(s));
+    /* ★ 旧库迁移：CREATE TABLE IF NOT EXISTS 对**已存在**的表什么都不做，
+     *   所以已经跑过一轮的房间（里面有真实的卡和消息）不会自动长出 cid 列。
+     *   这里补一条 ALTER；SQLite 没有 ADD COLUMN IF NOT EXISTS，
+     *   列已存在会抛 "duplicate column name" —— 吞掉即可（幂等靠 try/catch）。
+     *   【为什么不重建表】房间里有 30 天的消息与角色卡，重建 = 数据清空。 */
+    try{ this.sql.exec('ALTER TABLE members ADD COLUMN cid TEXT'); }catch(e){ /* 列已存在 */ }
     /* ★ 在线人数 = **当前活跃 ws 连接数**（用户已定口径）。
      * 【为什么不查 members 表的 last_seen】那是累计接入人次，永不减少 ——
      *   一个人反复刷新/重连就一路累加（真机：3 人的房间显示 13 人）。
@@ -101,6 +121,7 @@ export class RoomDO extends DurableObject {
         const r = one('SELECT family, data FROM pcs WHERE anon_id = ?', a);
         return r ? {family:r.family, data:JSON.parse(r.data)} : null;
       },
+      async delCard(a){ sql.exec('DELETE FROM pcs WHERE anon_id = ?', a); },
       async setCard(a, card){
         sql.exec(`INSERT INTO pcs (anon_id, family, version, data, updated_at) VALUES (?, ?, 1, ?, ?)
                   ON CONFLICT(anon_id) DO UPDATE SET family = excluded.family, data = excluded.data,
@@ -137,6 +158,11 @@ export class RoomDO extends DurableObject {
       async since(cursor, limit){
         return q('SELECT * FROM messages WHERE seq > ? ORDER BY seq LIMIT ?', cursor, limit).map(row2msg);
       },
+      /* ★ 最近 N 条（首屏用）：ORDER BY seq DESC 再反转 —— 取的是"尾巴"不是"开头" */
+      async recent(limit){
+        return q('SELECT * FROM messages ORDER BY seq DESC LIMIT ?', limit || 200)
+          .reverse().map(row2msg);
+      },
       async history(beforeSeq, limit){
         return q('SELECT * FROM messages WHERE seq < ? ORDER BY seq DESC LIMIT ?', beforeSeq, limit)
           .reverse().map(row2msg);
@@ -163,16 +189,35 @@ export class RoomDO extends DurableObject {
     }
 
     if(url.pathname === '/join'){
-      const {nick, pin} = await req.json();
+      const body = await req.json();
+      const {nick, pin} = body;
       const room = this.sql.exec('SELECT * FROM room WHERE id = 1').toArray()[0];
       if(!room) return Response.json({error:'no_room'}, {status:404});
       if(room.pin_hmac){
         const v = await verifyPin(String(pin || ''), room.pin_salt, room.pin_hmac, this.env.PIN_SECRET);
         if(!v.ok) return Response.json({error:'bad_pin'}, {status:401});
       }
-      const anonId = crypto.randomUUID();
-      this.sql.exec('INSERT OR IGNORE INTO members (anon_id, nick, joined_at, last_seen, msg_count) VALUES (?, ?, ?, ?, 0)',
-        anonId, String(nick || '玩家').slice(0, 16), now, now);
+      /* ★ 按 cid 找回老身份（真机反馈 · B 组）：关页重进本来会现发一个新的 anon_id，
+       *   于是卡、昵称全丢 —— 玩家以为"绑定了却读不出来"。
+       *   【PIN 房间的口径不变】cid 只在本机，PIN 校验在这之前已经过了：
+       *   不知道 PIN 的人就算拿到 cid 也进不来；进得来才谈得上恢复身份。
+       *   【换设备 / 换浏览器】没有 cid（或 cid 没记录过）→ 正常发新身份，符合无账号体系。 */
+      let cid = typeof body.cid === 'string' ? body.cid.trim().slice(0, 64) : '';
+      if(cid && !/^[A-Za-z0-9_-]{8,64}$/.test(cid)) cid = '';      // 不合法就当没有，不报错（保守）
+      let anonId = null;
+      if(cid){
+        const old = this.sql.exec('SELECT anon_id FROM members WHERE cid = ?', cid).toArray()[0];
+        if(old) anonId = old.anon_id;                              // ★ 同一个 cid 一定是同一个人
+      }
+      if(!anonId){
+        anonId = crypto.randomUUID();
+        this.sql.exec('INSERT OR IGNORE INTO members (anon_id, cid, nick, joined_at, last_seen, msg_count) VALUES (?, ?, ?, ?, ?, 0)',
+          anonId, cid || null, String(nick || '玩家').slice(0, 16), now, now);
+      }
+      // 老身份回来时补写 cid（迁移前建的行没有 cid），并刷新 last_seen
+      // ★ SQL 里用双引号写空串：单引号会把 JS 字符串截断（打包时才发现，代价太大）
+      if(cid) this.sql.exec('UPDATE members SET cid = ?, last_seen = ? WHERE anon_id = ? AND (cid IS NULL OR cid = "")', cid, now, anonId);
+      this.sql.exec('UPDATE members SET last_seen = ? WHERE anon_id = ?', now, anonId);
       const token = await signToken({code:room.code, anon_id:anonId, exp:Math.floor(now / 1000) + TOKEN_TTL}, this.env.PIN_SECRET);
       return Response.json({token, anon_id:anonId, rule:room.rule});
     }
@@ -222,7 +267,10 @@ export class RoomDO extends DurableObject {
       const [client, server] = Object.values(pair);
       this.ctx.acceptWebSocket(server);
       // ★ 身份只存 attachment：DO 休眠唤醒后内存态丢失，attachment 会被恢复
-      server.serializeAttachment({anon_id:v.payload.anon_id});
+      server.serializeAttachment({anon_id:v.payload.anon_id, ts:Date.now()});
+      /* ★ 有人连上就把巡检闹钟排上：不排的话 alarm 永远不响，半开连接没人清理。
+       *   闹钟本来也负责每日清理，这里只是把它提前到 1 分钟后 —— 人走光后会自动退回 DAY。 */
+      this.ctx.storage.setAlarm(Date.now() + SWEEP_MS);
       this.sql.exec('UPDATE members SET last_seen = ? WHERE anon_id = ?', Date.now(), v.payload.anon_id);
       this.sql.exec('UPDATE room SET last_active = ? WHERE id = 1', Date.now());
       return new Response(null, {status:101, webSocket:client});
@@ -239,6 +287,8 @@ export class RoomDO extends DurableObject {
 
     const att = ws.deserializeAttachment() || {};
     const anonId = att.anon_id;
+    /* ★ 任何帧都算"还活着"（心跳 ping 也是帧）—— 刷新 ts，避免被巡检误判离线 */
+    ws.serializeAttachment(Object.assign({}, att, {ts:Date.now()}));
 
     if(f.t === IN.HELLO){
       const room = await this.storage().getRoom();
@@ -248,9 +298,25 @@ export class RoomDO extends DurableObject {
         room:{rule:room.rule, baredice:!!room.baredice, seq:room.seq, msg_count:await this.storage().countMsgs()},
         server_time:Date.now(), members:mem,
         online:this.onlineCount(), total:mem.length});
-      // ★ 补齐：客户端上报它已渲染到哪（cursor），服务端只发它之后的 —— 不存服务端 cursor
-      const r = await this.core.since(f.cursor || 0, 200);
-      if(r.msgs.length) this.send(ws, {t:OUT.BATCH, msgs:r.msgs, cursor:r.cursor, has_more:r.has_more});
+      /* ★ 首屏 vs 补齐（真机反馈 · C 组）
+       *   cursor = 0（刷新 / 新进）→ 要**最近** 200 条：跑团看的是"刚才发生了什么"。
+       *     走 since(0) 会拿到最早 200 条，房间一长就再也看不到新消息。
+       *   cursor > 0（重连）→ 仍然只补它之后的（幂等 + 不重复），这是重连的既定语义。 */
+      const fresh = !f.cursor;
+      const r = fresh ? await this.core.recent(200) : await this.core.since(f.cursor, 200);
+      if(r.msgs.length){
+        /* ★ why 必须显式带：靠"oldest 是否小于 cursor"去猜是分不出来的 ——
+         *   首屏那批本身就是 200 条连续段，oldest 当然小于末尾，会被误判成"上翻的历史"，
+         *   于是首屏不推进 cursor，重连就永远补不齐（这类 bug 只能靠显式标记避免）。 */
+        this.send(ws, {t:OUT.BATCH, why:'first', msgs:r.msgs, cursor:r.cursor, has_more:r.has_more,
+          /* ★ 首屏多带两个字段：前端要靠它们决定"能不能往上翻"
+           *   oldest = 当前这批里最小 seq（上翻的锚点）；total = 房间里总共有多少条 */
+          oldest:r.msgs[0].seq, total:(typeof r.total === 'number' ? r.total : null)});
+      }else{
+        // 空房间也要给 total，否则前端不知道"确实没有更早的"还是"还没拿到"
+        this.send(ws, {t:OUT.BATCH, why:'first', msgs:[], cursor:0, has_more:false, oldest:null,
+          total:fresh ? await this.storage().countMsgs() : null});
+      }
       return this.broadcast(this.presenceFrame(), ws);
     }
 
@@ -261,7 +327,12 @@ export class RoomDO extends DurableObject {
     }
     if(f.t === IN.HISTORY){
       const r = await this.core.history(f.before_seq, f.limit || 200);
-      return this.send(ws, {t:OUT.BATCH, msgs:r.msgs, cursor:r.cursor, has_more:false});
+      /* ★ 上翻也要带 oldest / has_more：前端靠 oldest 决定下一页的锚点，
+       *   靠 has_more 决定"还能不能再往上翻"（没有的话会一直发请求，翻到底也不停）。
+       *   【has_more 的算法】取满一页才说明可能还有更早的；不足一页即到顶。 */
+      const oldest = r.msgs.length ? r.msgs[0].seq : null;
+      return this.send(ws, {t:OUT.BATCH, why:'page', msgs:r.msgs, cursor:r.cursor,
+        has_more:r.msgs.length >= (f.limit || 200), oldest});
     }
 
     if(f.t === IN.CMD || f.t === IN.CHAT){
@@ -281,6 +352,28 @@ export class RoomDO extends DurableObject {
     this.broadcast(this.presenceFrame());
   }
   async webSocketError(ws){ this.broadcast(this.presenceFrame()); }
+
+  /* ★ 巡检：把"半开连接"关掉 —— 息屏 / 切后台 / 断网的对端不会发关闭帧，
+   *   服务端这边 readyState 一直是 1，只能靠"多久没收到帧"来判定。
+   *   【为什么不能只靠 readyState】实测：对端断开后 getWebSockets() 仍返回它且 readyState=1。 */
+  sweepIdle(){
+    const now = Date.now();
+    const all = this.ctx.getWebSockets();
+    const stale = all.filter(ws => {
+      const att = ws.deserializeAttachment() || {};
+      const last = att.ts || 0;
+      return !!last && now - last > IDLE_MS;
+    });
+    stale.forEach(ws => { try{ ws.close(4000, 'idle'); }catch(e){ /* 已断 */ } });
+    if(!stale.length) return 0;
+    /* ★ 存活数必须**自己算**，不能靠 onlineCount()：
+     *   实测（workerd 真跑）ws.close() 之后 readyState 不会立刻翻转（关闭是异步的），
+     *   此时 onlineCount() 仍返回包括刚关掉那些在内的数字 —— 广播出去的人数还是虚高的。
+     *   "总连接数 − 这次关掉的数" 是确定值，不依赖运行时什么时候真正关掉。 */
+    const mem = this.members();
+    this.broadcast({t:OUT.PRESENCE, members:mem, online:all.length - stale.length, total:mem.length});
+    return stale.length;
+  }
 
   members(){ return this.sql.exec('SELECT anon_id, nick FROM members ORDER BY joined_at').toArray(); }
   memberCount(){ return this.sql.exec('SELECT COUNT(*) AS c FROM members').toArray()[0].c; }
@@ -322,7 +415,9 @@ export class RoomDO extends DurableObject {
     this.sql.exec('DELETE FROM messages WHERE ts < ?', cut);
     this.sql.exec('DELETE FROM idempotency WHERE ts < ?', cut);   // 与消息同窗口，避免 dup 指向已删消息
     this.sql.exec('UPDATE room SET last_active = ? WHERE id = 1', now);
-    this.ctx.storage.setAlarm(now + DAY);
+    // ③ 顺带巡检在线连接；有人在就一分钟后继续巡，没人就退回每日清理
+    this.sweepIdle();
+    this.ctx.storage.setAlarm(this.onlineCount() > 0 ? now + SWEEP_MS : now + DAY);
   }
 
   get code(){ return this.ctx.id.name || ''; }

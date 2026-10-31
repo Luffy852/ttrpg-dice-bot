@@ -129,7 +129,10 @@ export default {
       const stub = stubOf(env, code);
       if(sub === '/join' && request.method === 'POST'){
         let b = {}; try{ b = await request.json(); }catch(e){}
-        const r = await doFetch(stub, '/join', {method:'POST', body:JSON.stringify({nick:b.nick, pin:b.pin})});
+        /* ★ cid 必须一起转发（真机踩到）：这里原先只转 {nick, pin}，
+         *   前端辛苦生成并持久化的 cid 在网关这一层被丢掉 —— DO 侧逻辑全对也没用。
+         *   这类"转发漏字段"的 bug 单测很难发现（room.js 单独跑是好的），只能靠端到端。 */
+        const r = await doFetch(stub, '/join', {method:'POST', body:JSON.stringify({nick:b.nick, pin:b.pin, cid:b.cid})});
         return JSON_(await r.json(), r.status);
       }
       if(sub === '/meta')    return JSON_(await (await doFetch(stub, '/meta')).json());

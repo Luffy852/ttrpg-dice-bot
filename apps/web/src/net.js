@@ -76,8 +76,13 @@ export function createNet({code, token, nick, on = {}, backoffBase = 1000}){
     if(f.t === OUT.WELCOME) return on.welcome && on.welcome(f);
     if(f.t === OUT.BATCH){
       if(f.msgs && f.msgs.length){
-        cursor = Math.max(cursor, cursorOf(f.msgs));
-        on.batch && on.batch(f.msgs, f.cursor, f.has_more);
+        /* ★ 上翻来的历史**不能**推进 cursor：cursor 是"我已连续渲染到哪"的水位，
+         *   只用于重连补齐。把更早的消息算进去会让它空涨，重连时反而漏掉中间段。
+         *   isHistory 帧（oldest 存在且不是最新那条）单独标记，交给 UI 插到顶部。 */
+        const isHistory = f.why === 'page';
+        if(!isHistory) cursor = Math.max(cursor, cursorOf(f.msgs));
+        on.batch && on.batch(f.msgs, f.cursor, f.has_more,
+          {why:f.why || 'live', oldest:f.oldest, total:f.total, hasMoreOlder:!!f.has_more});
       }
       return;
     }

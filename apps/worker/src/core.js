@@ -107,6 +107,7 @@ export function createRoomCore(storage, opts){
 
     const ctx = await buildCtx(anonId, nick);
     const before = ctx._roomBefore;
+    const hadCard = !!ctx.card;      // ★ 执行前是否绑着卡 —— 解绑要靠它区分"删"与"本来就没有"
 
     /* ④ ★★ 用户原文**无条件**进消息记录（呈现原则 3：用户指令必须可回看）
      *    —— 不是"只在引擎没输出时才记"。
@@ -149,7 +150,13 @@ export function createRoomCore(storage, opts){
     const after = {rule:ctx.room.rule, baredice:ctx.room.baredice, ruleSetBy:ctx.room.ruleSetBy, ruleSetAt:ctx.room.ruleSetAt};
     const changed = before.rule !== after.rule || before.baredice !== after.baredice;
     if(changed) await storage.setRoom(after);
+    /* ★ 解绑必须真的删库（真机反馈 · B 组）：`.st clear` 把 ctx.card 置成 null，
+     *   而这里原先只写 `if(ctx.card)` —— null 就什么都不做，库里的卡原封不动。
+     *   于是：clear → 提示"已解绑" → 再发 `.st` 又从库里读回来，卡"复活"。
+     *   （同一时间别的玩家发 `.st` 只是让你看到自己的卡复活，不是他把你卡改回来了。）
+     *   hadCard 必须在**执行前**记下，否则分不清"本来就没卡"和"刚解绑"。 */
     if(ctx.card) await storage.setCard(anonId, ctx.card);
+    else if(hadCard) await storage.delCard(anonId);
     if(ctx.me !== nick) await storage.setNick(anonId, ctx.me);
 
     log('apply', {reqId, n, base, changed});
@@ -167,10 +174,23 @@ export function createRoomCore(storage, opts){
     return {msgs, cursor:cursorOf(msgs), has_more:msgs.length >= (limit || HISTORY_LIMIT)};
   }
 
+  /** ★ 首屏：取**最近** HISTORY_LIMIT 条（真机反馈 · C 组）
+   * 【坑】刷新时客户端 cursor 归 0，若走 since(0) 拿到的是**最早** 200 条 ——
+   *   房间超过 200 条后，刷新后看到的是开头那一段，后面的消息再也出不来
+   *   （没有上滚加载就永远看不到，而战报导出是全量，用户会以为消息丢了）。
+   *   不刷新时一直走 ws 增量，所以这个 bug 只在"刷新/重进"时出现 —— 最难发现的一种。
+   * 【为什么是最近而不是最早】跑团看的是"刚才发生了什么"，最近 200 条才是有效信息。 */
+  async function recent(limit){
+    const n = limit || HISTORY_LIMIT;
+    const msgs = await storage.recent(n);
+    const total = await storage.countMsgs();
+    return {msgs, cursor:cursorOf(msgs), has_more:total > msgs.length, total};
+  }
+
   /** 向上翻页 */
   async function history(beforeSeq, limit){
     return {msgs:await storage.history(beforeSeq, limit || HISTORY_LIMIT)};
   }
 
-  return {apply, since, history, factsOf, code};
+  return {apply, since, recent, history, factsOf, code};
 }

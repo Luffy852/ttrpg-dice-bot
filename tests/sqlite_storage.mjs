@@ -58,6 +58,7 @@ export function createSqliteStorage(db, code){
            version = version + 1, updated_at = excluded.updated_at`,
         a, card.family, JSON.stringify(card.data), Date.now());
     },
+    async delCard(a){ run('DELETE FROM pcs WHERE anon_id = ?', a); },
     async setNick(a, n){ run('UPDATE members SET nick = ? WHERE anon_id = ?', n, a); },
     async getIdem(reqId){
       const r = one('SELECT seq, ts FROM idempotency WHERE req_id = ?', reqId);
@@ -76,6 +77,7 @@ export function createSqliteStorage(db, code){
     /* ★ 现存量 COUNT(*)，不用 room.seq —— seq 删后不回退，30 天清理后虚高。与 room.js 同构。 */
     async countMsgs(){ return one('SELECT COUNT(*) AS c FROM messages').c; },
     async since(cursor, limit){ return rows2msgs(q('SELECT * FROM messages WHERE seq > ? ORDER BY seq LIMIT ?', cursor, limit)); },
+    async recent(limit){ return run('SELECT * FROM messages ORDER BY seq DESC LIMIT ?', limit || 200).reverse().map(row2msg); },
     async history(beforeSeq, limit){ return rows2msgs(q('SELECT * FROM messages WHERE seq < ? ORDER BY seq DESC LIMIT ?', beforeSeq, limit)).reverse(); },
     // 测试辅助
     cleanOlderThan(ts){ run('DELETE FROM messages WHERE ts < ?', ts); run('DELETE FROM idempotency WHERE ts < ?', ts); },
