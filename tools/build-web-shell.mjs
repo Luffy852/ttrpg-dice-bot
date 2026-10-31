@@ -109,6 +109,10 @@ const CSS = `
 /* 发送中的气泡：等 ack 时先占位，收到服务端消息后由真实消息替换（不重复） */
 .msg.pending{opacity:.55}
 .msg.pending .bubble::after{content:'发送中…';font-size:11px;color:var(--tx3);margin-left:6px}
+/* ★ 骰娘回复的「回应谁」：多人房间里一串「骰娘」气泡必须有归属，否则分不清是谁的指令换来的结果 */
+.who{flex-wrap:wrap}
+.who .re{font-size:11px;font-weight:700;color:var(--tx);background:var(--chipbg);border:1px solid var(--chipline);border-radius:999px;padding:0 6px}
+.who .re.me{background:#e7f6ed;border-color:#cdebd8;color:var(--ok)}
 `;
 html = html.replace('</style>', CSS + '</style>');
 

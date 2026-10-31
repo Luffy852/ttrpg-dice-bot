@@ -8,8 +8,8 @@ import { packOfFamily, rulePack, verbOwner } from './packs.js';
 import { parseExpr } from './parse.js';
 import { defsHtml, renderDefs } from './render.js';
 import { rollGroups } from './roll.js';
-import { IMPLEMENTED, RULE_META, normalizeRule, ruleFamily } from './rules.js';
-import { esc } from './util.js';
+import { IMPLEMENTED, RULE_META, normalizeRule, ruleFamily, ruleToken } from './rules.js';
+import { esc, hhmm } from './util.js';
 import { buildTotal, natMarkOf, natOf, sumKept } from './view.js';
 
 const VERBS = new Set(['r','h','help','status','stat','set','rule','name','nn','st','rc','ra','rd','dh','fu']);
@@ -52,11 +52,6 @@ function parseCommand(text){
 function isCommandText(text, room){
   if(parseCommand(text)) return true;
   return !!(room && room.baredice && /^[\s\d+\-dD]+$/.test(String(text).trim()) && /\d*d\d/i.test(text));
-}
-
-function hhmm(d){
-  const p = n => (n < 10 ? '0' : '') + n;
-  return p(d.getHours()) + ':' + p(d.getMinutes());
 }
 
 // 房间状态：M1 在内存里；M3 由 Durable Object 持有，字段不变
@@ -194,12 +189,22 @@ function handleCommand(text, ctx){
     if(ctx.card) cardHtml = packOfFamily(ctx.card.family).renderCard(ctx.card);
     else cardHtml = '<div class="stline">未绑定 · 用 <b>.st set ...</b> 绑定，或 .st 查看模板</div>';
     const warn = cardMismatchNote(ctx.card, room.rule);
+    /* ★「本房间共 N 条」用的是**现存量**（core 注入的 room.msgCount），不是 ctx.history。
+     * 【为什么会显示 0】ctx.history 是「我最近 5 条投掷」，给 .h 用的 —— 拿它当房间总数，
+     *   于是刚进房（自己还没掷过）永远显示 0（真机反馈 · A 组）。
+     * 【兜底】老数据 / 纯逻辑测试里 room.msgCount 可能是 undefined ——
+     *   这时显示"—"而不是 0：**写 0 会让人以为房间是空的**，而"未知"至少不会误导。 */
+    const cnt = (room.msgCount == null) ? '—' : room.msgCount;
+    const onl = (room.online == null) ? null : room.online;
+    const mem = (room.members == null) ? null : room.members;
     page(defsHtml({title:'📋 当前状态', rows:[
       {k:'房间规则',   v:RULE_META[room.rule].name + '（' + room.rule + '）'},
       {k:'规则设定者', v:room.ruleSetBy ? (esc(room.ruleSetBy) + ' · ' + esc(room.ruleSetAt)) : '（尚未修改过）'},
       {k:'我的昵称',   v:esc(me)},
       {k:'裸骰识别',   v:(room.baredice ? '开' : '关') + '　（.set baredice on 开启）'},
-      {k:'消息留存',   v:'30 天 · 本房间共 ' + ctx.history.length + ' 条'}
+      {k:'在场人数',   v:(onl == null ? '—' : (onl + ' 人在线')) +
+        (mem == null ? '' : ('　｜　累计接入 ' + mem + ' 人次'))},
+      {k:'消息留存',   v:'30 天 · 本房间共 ' + cnt + ' 条'}
     ]}) + '<div class="hs"><div class="hh">我的角色卡' + (ctx.card ? ' · ' + esc(cardRuleName(ctx.card)) : '') + '</div>' +
       cardHtml + (warn ? '<div class="hf">' + warn + '</div>' : '') + '</div>');
     return {msgs:out, handled:true};
@@ -214,11 +219,23 @@ function handleCommand(text, ctx){
       return;
     }
     if(key === room.rule){ notice('当前已经是 ' + RULE_META[key].name + '。'); return; }
-    const from = RULE_META[room.rule].name, to = RULE_META[key].name;
-    const now = new Date();
+    const fromKey = room.rule, from = RULE_META[fromKey].name, to = RULE_META[key].name;
+    /* ★ 用**注入的时钟**而不是 new Date()：引擎的"现在"必须与消息 ts 同源，
+     *   否则 .status / 规则变更广播里的时间与气泡右上角来自两个时钟
+     *   （真机反馈 · A 组第 1 条）。单机 / 测试（makeRoom 不注入 nowMs）退回 Date.now()。 */
+    const now = new Date(room.nowMs == null ? Date.now() : room.nowMs);
     room.rule = key; room.ruleSetBy = me; room.ruleSetAt = hhmm(now);
     say({kind:'sys', from:'骰娘', actor:me, title:'⚠️ @全体 规则设定已变更', line1:from + ' → ' + to,
-         line2:'由 ' + me + ' 于 ' + hhmm(now) + ' 修改（所有人都可以修改，如需回退请输入 .set rule ' + (key === 'generic' ? 'dnd' : 'generic') + '）'});
+         /* ★ 回退提示必须指向**切换前**那条规则，不是写死的 generic。
+          * 【老写法】key === 'generic' ? 'dnd' : 'generic' —— 从匕首心切到最终物语，
+          *   提示的却是"回退请输入 .set rule generic"，而用户想回的是匕首心（真机反馈 · A 组）。
+          * 【为什么用 ruleToken 而不是 key】'dnd5r' / 'coc7' 是内部 key，
+          *   让用户照抄 .set rule coc7 虽然也能用，但 'coc' 才是文档里到处写的那个写法。 */
+         /* ★ 这里不能写 <b>：sys 的 line1/line2 走 renderSys → esc()，是**纯文本**通道，
+          *   带标签会被原样显示成 "<b>.set rule dh</b>"（比不加更糟）。要强调得改渲染通道，
+          *   代价是动 payload 白名单与快照 —— 不值得，保持纯文本。 */
+         line2:'由 ' + me + ' 于 ' + hhmm(now) + ' 修改（所有人都可以修改，如需回退请输入 .set rule ' +
+               ruleToken(fromKey) + '）'});
     // 规则 × 角色卡 是两个正交维度：切规则时必须提示，不静默（提示文案由同一处产出，三处共用）
     if(ctx.card){
       const warn = cardMismatchNote(ctx.card, key);

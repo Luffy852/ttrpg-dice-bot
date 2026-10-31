@@ -1400,6 +1400,75 @@ console.log('== 23. 真机反馈第四轮（M2 Chrome 实机 7 条）★ 本轮 
   }
 }
 
+console.log('== 24. 真机反馈第五轮（M3 手机端 · 3 条）★ 本轮 ==');
+{
+  const strip24 = s => String(s == null ? '' : s).replace(/<[^>]+>/g, '');
+
+  // ① 规则变更的回退提示必须指向**切换前**那条规则（不是写死的 generic）
+  {
+    // 匕首心 → 最终物语：回退该是 dh，不是 generic
+    const c = mkCtx('dh');
+    const sys = runCmd('.set rule fu', c).find(m => m.kind === 'sys');
+    ok('★ 回退提示指向切换前的规则（.set rule dh）', /\.set rule dh/.test(sys.line2), sys.line2);
+    eq('★ 不再写死 generic', /\.set rule generic/.test(sys.line2), false);
+    // 从通用切走：回退该是 generic
+    const c2 = mkCtx('generic');
+    const sys2 = runCmd('.set rule coc', c2).find(m => m.kind === 'sys');
+    ok('★ 从通用切走时回退提示就是 generic', /\.set rule generic/.test(sys2.line2), sys2.line2);
+    // 5.5e 用文档里到处写的那个写法（'5.5e'），不是内部 key 'dnd5r'
+    const c3 = mkCtx('dnd5r');
+    const sys3 = runCmd('.set rule coc', c3).find(m => m.kind === 'sys');
+    ok('★ 回退用的是可照抄的别名（5.5e 而不是 dnd5r）', /\.set rule 5\.5e/.test(sys3.line2), sys3.line2);
+    // 六条规则两两都指向"来时那条"
+    const KEYS = ['generic','dnd5e','dnd5r','coc7','dh','fu'];
+    KEYS.forEach(from => KEYS.forEach(to => {
+      if(from === to) return;
+      const cc = mkCtx(from);
+      const s = runCmd('.set rule ' + Engine.RULE_TOKEN[to], cc).find(m => m.kind === 'sys');
+      ok('★ ' + from + ' → ' + to + ' 回退指回 ' + from,
+        s.line2.indexOf('.set rule ' + Engine.RULE_TOKEN[from]) >= 0, s.line2);
+    }));
+    // ★ sys 的 line 是纯文本通道（renderSys → esc），提示里不许带标签
+    ok('★ 回退提示不含 HTML 标签（sys 是 esc 通道）', !/[<>]/.test(sys.line2), sys.line2);
+  }
+
+  // ② FU 的无卡提示必须给**骰阶**，不是属性名（属性没绑卡就没有骰阶）
+  {
+    const tpl = Engine.FU_PACK.cardTemplate();
+    const foot = (tpl.foot || []).join(' ');
+    ok('★ 卡模板的无卡示例用骰阶 .fu d8 d10 10', /\.fu d8 d10 10/.test(foot), strip24(foot));
+    eq('★ 卡模板不再拿属性名当"直接给骰阶"的例子', /直接给骰阶[^。]*dex ins/.test(foot), false);
+    const hint = Engine.FU_PACK.checkHint();
+    ok('★ checkHint 首个示例就是骰阶写法', hint.indexOf('.fu d8 d10 10') < hint.indexOf('.fu dex ins 10'), strip24(hint));
+    // .rc list（本规则下）无卡时，每行都该给"此刻能掷"的写法
+    const list = Engine.FU_PACK.listChecks('fu', null);
+    const rows = list.sections[0].rows.map(r => r.v).join(' ');
+    eq('★ 无卡时清单不再一律写 .fu dex dex 10', /\.fu dex dex 10/.test(rows), false);
+    ok('★ 无卡时清单给"先绑卡 / 或直接掷骰阶"两条路', /\.st set /.test(rows) && /\.fu d8 d10 10/.test(rows), strip24(rows).slice(0, 120));
+    // 绑了卡就该回到属性名（不能为了无卡把有卡的方便也砍了）
+    const list2 = Engine.FU_PACK.listChecks('fu', {family:'fu', data:{dex:8, ins:10}});
+    ok('★ 有卡时清单仍给属性名写法', /\.fu dex dex 10/.test(list2.sections[0].rows.map(r => r.v).join(' ')));
+    // 真正照抄"提示里的写法"必须掷得出来：无卡 + 骰阶 → 出 roll
+    const m = lastMsg(runCmd('.fu d8 d10 10', mkCtx('fu', null)));
+    ok('★ 无卡照抄提示的骰阶写法真能掷出结果', m.kind === 'roll' && m.view.groups.length === 2, m.kind);
+    const m2 = lastMsg(runCmd('.fu dex ins 10', mkCtx('fu', null)));
+    ok('★ 无卡写属性名仍是友好提示（掷不出）', m2.kind === 'notice' && /尚未绑定角色卡/.test(strip24(m2.html)), strip24(m2.html).slice(0, 60));
+  }
+
+  // ③ 时间口径统一（这里只锁"引擎用的是注入时钟"这条契约；时区口径在 test_protocol §9）
+  {
+    const c = mkCtx('generic');
+    c.room.nowMs = 1772000000000;             // core 注入的服务端时钟
+    const sys = runCmd('.set rule coc', c).find(m => m.kind === 'sys');
+    eq('★ 引擎用注入的 nowMs（与消息 ts 同源）', c.room.ruleSetAt, Engine.hhmm(1772000000000));
+    ok('★ 广播里的时间与 room.ruleSetAt 一致', sys.line2.indexOf('于 ' + c.room.ruleSetAt) >= 0, sys.line2);
+    // 不注入时退回 Date.now()，不能崩
+    const c2 = mkCtx('generic');
+    const sys2 = runCmd('.set rule coc', c2).find(m => m.kind === 'sys');
+    ok('★ 未注入 nowMs 时退回当前时间（不崩）', /^\d{2}:\d{2}$/.test(c2.room.ruleSetAt), String(c2.room.ruleSetAt));
+  }
+}
+
 console.log('\n---------------------------');
 console.log('通过 ' + pass + ' 项，失败 ' + fail + ' 项' + (FOUND.stale ? '  （⚠️ 跑的是 M1 版 html）' : ''));
 if(fail){

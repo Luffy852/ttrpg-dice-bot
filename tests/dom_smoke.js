@@ -29,6 +29,7 @@ const HTML = path.join(ROOT, 'apps', 'web', 'index.html');
 
 const {createMockServer} = await import('./mock_server.mjs');
 const {OUT} = await import('../packages/protocol/src/frames.js');
+const Engine = await import('../packages/engine/src/index.js');
 
 const src = fs.readFileSync(HTML, 'utf8');
 const errs = [];
@@ -193,7 +194,40 @@ function type(ui, net, text){
     dup.filter(m => m.kind === 'cmd').length === 1,
     'cmd=' + dup.filter(m => m.kind === 'cmd').length);
   ok('★ 语义标签在渲染产物里（百分骰十位/个位）', /class="plab"/.test(d.body.innerHTML));
+  /* ★ 骰娘的每条回复都要带「回应谁」—— 多人房间里一串「骰娘」气泡分不清是谁的指令换来的结果。
+   *   断言口径：标记条数 = 服务端落库里骰娘的非横幅消息条数（少一条 = 有回复没归属）。
+   *   sys / notice 是横幅消息，不走 who 行（它们内容里已写明发起人），不计入。 */
+  const botBubble = all.filter(m => m.from === '骰娘' && m.kind !== 'sys' && m.kind !== 'notice').length;
+  const tags = Array.from(d.querySelectorAll('.who .re'));
+  ok('★ 骰娘每条回复都标了回应对象（条数对得上）', tags.length === botBubble,
+    'dom=' + tags.length + ' server=' + botBubble);
+  ok('★ 标记写的是发起人昵称（不是一律"骰娘"）', tags.length > 0 && tags.every(t => /→ 老王/.test(t.textContent)),
+    tags.length ? tags[0].textContent : '(无标记)');
+  ok('★ 玩家自己的消息不重复加标记（who 已是昵称）',
+    !d.querySelector('.msg.me .who .re'));
+  ok('★ 自己指令换来的回复另有强调色（窄屏一眼找到自己的骰）',
+    d.querySelectorAll('.who .re.me').length > 0);
   ok('★ 消息按 seq 严格递增落库', all.every((m, i) => i === 0 || m.seq > all[i - 1].seq));
+  /* ★ 气泡时间戳必须与服务端同一个时钟（真机反馈 · A 组第 1 条：.status 写 08:12、
+   *   同一条消息气泡显示 16:12）。沙盒 TZ 恰好也是 UTC+8，不拨 TZ 这条会假绿 ——
+   *   这里强制 TZ=UTC：修好后气泡仍显示 UTC+8，改回本地时区就会变 UTC（转红）。 */
+  const oldTz = process.env.TZ;
+  process.env.TZ = 'UTC';
+  const tsEl = d.querySelector('.msg .who .ts');
+  const anyMsg = all.find(m => m.kind === 'cmd' || m.kind === 'chat');
+  ok('★ 气泡时间戳 = 服务端 hhmm（UTC+8，不受浏览器时区影响）',
+    !!tsEl && tsEl.textContent === Engine.hhmm(anyMsg.ts),
+    'dom=' + (tsEl && tsEl.textContent) + ' want=' + Engine.hhmm(anyMsg.ts));
+  process.env.TZ = oldTz;
+  /* ★ 顶栏：在线人数与累计人次分开（A 组第 3 条）。替身里 conns 只 join 不 attach，
+   *   所以 online=0、total=1 —— 断言的是"两个数都在、且在线不显示累计值"。 */
+  const roomPill = d.getElementById('p-room').textContent;
+  ok('★ 顶栏写明"N 人在线"而不是把累计人次当在线', /人在线/.test(roomPill), roomPill);
+  ok('★ 累计人次另有标注（在线 < 累计时）', /人在线/.test(roomPill) && /累计/.test(roomPill), roomPill);
+  /* ★ 顶栏条数：已加载 / 总数两个都要（A 组第 2 条相关）。首屏 200 条上限内两者相等，
+   *   这里至少要保证"条数与服务端落库一致"，不是恒为 0。 */
+  const cntPill = d.getElementById('p-cnt').textContent;
+  ok('★ 顶栏条数与服务端落库对得上', parseInt(cntPill, 10) === all.length, cntPill + ' vs ' + all.length);
   ok('★ 页面无 JS 错误', errs.length === 0, errs.slice(0, 3).join(' / '));
 
   /* 断线重连补齐：★ 连着补两次 —— 第一次把断线期间的消息补回来（条数应增加），

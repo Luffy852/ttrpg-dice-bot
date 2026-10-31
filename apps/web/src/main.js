@@ -66,10 +66,10 @@ function enter(r){
         ui.note('<b>连不上房间了</b>：请刷新页面重试。若反复如此，房间可能已过期（消息只保留 30 天）。');
         ui.failAll && ui.failAll('未送达');
       },
-      welcome(f){ ui.setRoom(f.room); ui.setMe(f.you.nick); ui.setMembers(f.members); },
+      welcome(f){ ui.setRoom(f.room); ui.setMe(f.you.nick); ui.setMembers(f.members, f.online, f.total); },
       batch(msgs){ msgs.forEach(m => ui.append(m)); },
       state(s){ ui.setRoom(s); },                    // ★ 以后端为准回写，不乐观更新
-      presence(list){ ui.setMembers(list); },
+      presence(list, online, total){ ui.setMembers(list, online, total); },
       ack(){ /* 真实消息由 batch 到达；占位气泡到那时才移除 */ },
       /* ★ dup 帧**不带 batch**，所以绝对不能"什么都不做"地干等 ——
          占位气泡会永远停在"发送中"。正常路径下 batch 会先到、pending 那时已被移除，

@@ -52,7 +52,8 @@ function loadEngine(){
   'isCommandText, defsHtml, renderDefs, renderCardHtml, renderHtml, critOf, ' +
   'ALIAS, detectConflicts, suggestAlias, lookupCheckTarget, normalizeCardKey, natMarkOf, NAT_MARK, ' +
   'hasNatSemantics, cardRuleName, cardMismatchNote, rulePack, RULE_PACKS, lookupAlias, ' +
-  'IMPLEMENTED, RULE_META, LIMITS, HELP_BODY, helpTop, ' +
+  'IMPLEMENTED, RULE_META, RULE_TOKEN, ruleToken, LIMITS, HELP_BODY, helpTop, ' +
+  'hhmm, ymd, ' +
   'rollPercent, judgeCoc, judgeDh, judgeFu, parseTier, lookupCocSkill, FAMILY_PACKS, ' +
   'packOfFamily, verbOwner, CHECK_DOMAIN, CARD_DOMAIN, checkDomainOf, cardDomainOf, ' +
   'COC_SKILLS, COC_MEMO, DH_TRAITS, FU_ATTRS, FU_TIERS, ' +

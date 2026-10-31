@@ -43,13 +43,21 @@ export function checkIn(f){
 }
 
 /* ---------- 出站帧构造：名字集中在上面，字段名也只在这里出现一次 ---------- */
-export const welcome = (you, room, serverTime, members) => ({t:OUT.WELCOME, v:PROTOCOL_VERSION, you, room, server_time:serverTime, members});
+/* ★ members 之外多带两个数（2026-10-31 真机反馈 · A 组第 3 条）：
+ *   原先把「累计接入人次」（members 表行数）当在线人数显示，一屋子人反复刷新就一路涨到 13。
+ *   - online    当前在线 = **活跃 ws 连接数**（断线即减，最可靠）
+ *   - total     累计接入人次 = members 表行数（历史累积，永不减少）
+ *   两个都要显示：前者是"现在几个人在"，后者是"这个房间总共来过多少人次"。 */
+export const presence = (members, online, total) =>
+  ({t:OUT.PRESENCE, members, online:online == null ? 0 : online, total:total == null ? members.length : total});
+export const welcome = (you, room, serverTime, members, online, total) =>
+  ({t:OUT.WELCOME, v:PROTOCOL_VERSION, you, room, server_time:serverTime,
+    members, online:online == null ? 0 : online, total:total == null ? members.length : total});
 export const batch   = (msgs, cursor, hasMore) => ({t:OUT.BATCH, msgs, cursor, has_more:!!hasMore});
 export const ack     = (reqId, seq) => ({t:OUT.ACK, req_id:reqId, seq});
 export const dup     = (reqId, seq, deleted) => ({t:OUT.DUP, req_id:reqId, seq, deleted:!!deleted});
 export const reject  = (reqId, code, detail) => ({t:OUT.REJECT, req_id:reqId, code, detail:detail || ''});
 export const state   = room => ({t:OUT.STATE, room});
-export const presence= members => ({t:OUT.PRESENCE, members});
 export const pong    = ts => ({t:OUT.PONG, ts});
 export const error   = (code, detail) => ({t:OUT.ERROR, code, detail:detail || ''});
 

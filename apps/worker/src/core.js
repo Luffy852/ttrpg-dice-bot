@@ -28,6 +28,10 @@ export function createRoomCore(storage, opts){
   const now = (opts && opts.now) || (() => Date.now());
   const rate = new Map();       // anonId → 令牌桶状态
   const log = (opts && opts.log) || (() => {});
+  /* ★ 在线人数由 DO 注入（core 是纯逻辑，碰不到 WebSocket 列表）。
+   *   不注入时是 null —— .status 显示「—」而不是编一个数字（保守：宁可少说，不可说错）。 */
+  const onlineOf = (opts && opts.online) || null;
+  const memberCountOf = (opts && opts.memberCount) || null;
 
   /* ---------- 引擎 ctx：房间状态 ⇄ 引擎 ---------- */
   async function buildCtx(anonId, nick){
@@ -36,6 +40,12 @@ export function createRoomCore(storage, opts){
     // .h 只查我自己的最近投掷 —— 不把整个房间历史塞进内存
     const rolls = await storage.recentRolls(anonId, IDLE_ROLLS);
     const history = rolls.map(m => ({kind:m.kind, actor:m.actor, ts:m.ts, view:Engine.viewFromPayload(m.payload)}));
+    /* ★ .status 的「本房间共 N 条」必须是**现存量 COUNT(*)**，不是 room.seq。
+     * 【为什么】seq 是"已分配到的最大序号"，删除后不回退 —— 30 天清理删掉旧消息后，
+     *   seq 仍指向一个不存在的序号，数字会一直虚高（实际 200 条显示 700）。
+     *   .status 是给人看的房间概况，语义必须是"现在还有多少条"（用户已定口径）。
+     * 【为什么不在引擎里自己数】引擎拿不到库；房间状态一律由 core 注入（ctx.room 的既有约定）。 */
+    const msgCount = await storage.countMsgs();
     let seq = room.seq || 0;
     return {
       room: {
@@ -43,6 +53,13 @@ export function createRoomCore(storage, opts){
         baredice: !!room.baredice,
         ruleSetBy: room.ruleSetBy || null,
         ruleSetAt: room.ruleSetAt || null,
+        msgCount,
+        online: onlineOf ? onlineOf() : null,      // 当前在线（ws 连接数）；null = 未知（纯逻辑测不到）
+        members: memberCountOf ? memberCountOf() : null,  // 累计接入人次
+        /* ★ 引擎里所有"现在几点"一律用**服务端时钟**（本项目铁律：客户端时间不可信，
+         *   而引擎既跑在 Worker 也可能跑在浏览器侧 —— 不注入就会出现两个时钟）。
+         *   注入后 .set rule 落库的时间串与消息 ts 保证同源；不注入时退回 Date.now()。 */
+        nowMs: now(),
         seq: 0,
         nextId(){ return ++seq; },     // id 是占位：真正的 id 由 allocSeq 分配
       },

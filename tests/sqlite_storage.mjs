@@ -73,6 +73,8 @@ export function createSqliteStorage(db, code){
     async recentRolls(anonId, n){
       return rows2msgs(q('SELECT * FROM messages WHERE kind = ? AND anon_id = ? ORDER BY seq DESC LIMIT ?', 'roll', anonId, n)).reverse();
     },
+    /* ★ 现存量 COUNT(*)，不用 room.seq —— seq 删后不回退，30 天清理后虚高。与 room.js 同构。 */
+    async countMsgs(){ return one('SELECT COUNT(*) AS c FROM messages').c; },
     async since(cursor, limit){ return rows2msgs(q('SELECT * FROM messages WHERE seq > ? ORDER BY seq LIMIT ?', cursor, limit)); },
     async history(beforeSeq, limit){ return rows2msgs(q('SELECT * FROM messages WHERE seq < ? ORDER BY seq DESC LIMIT ?', beforeSeq, limit)).reverse(); },
     // 测试辅助

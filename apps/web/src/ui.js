@@ -12,23 +12,33 @@
 import * as Engine from '../vendor/engine/index.js';
 import {toRenderable} from '../vendor/engine/render-md.js';
 
-function hhmm(ts){
-  const d = new Date(ts);
-  const p = n => (n < 10 ? '0' + n : String(n));
-  return p(d.getHours()) + ':' + p(d.getMinutes());
-}
+/* ★ 气泡时间戳与服务端用**同一个** hhmm（UTC+8），不再各按各的时区渲染。
+ * 【之前】这里按浏览器本地时区、服务端（Worker 跑在 UTC）按 UTC —— 同一个房间同一条消息，
+ *   .status 里写 08:12、气泡右上角显示 16:12，差 8 小时（真机反馈 · A 组第 1 条）。
+ * 【为什么直接 import 而不是照抄】抄一份迟早再次漂移（原则 4）。 */
+const hhmm = Engine.hhmm;
 
 export function createUI({code, onSubmit, onExport}){
   const $ = id => document.getElementById(id);
   const $stream = $('stream'), $input = $('input'), $send = $('send');
   const seen = new Set();
   const pending = new Map();               // req_id → 占位气泡元素
-  const st = {rule:'generic', baredice:false, me:'玩家', members:[], code};
+  const st = {rule:'generic', baredice:false, me:'玩家', members:[], code,
+    online:0, total:0, msgTotal:null, seqAtWelcome:0};
 
   /* ---------- 渲染：与单机版同一个 renderMsg ---------- */
+  /** 骰娘回复的「回应谁」标记。actor 由服务端写好（core.js），这里只负责显示 */
+  function replyTag(m){
+    if((m.from || '') !== '骰娘') return '';      // 玩家消息：who 行已是本人昵称，不重复
+    const a = m.actor;
+    if(!a || a === '骰娘') return '';
+    return '<span class="re' + (a === st.me ? ' me' : '') + '">→ ' + Engine.esc(a) + '</span>';
+  }
   function append(m){
     if(seen.has(m.id)) return false;       // ★ msg_id 去重
     seen.add(m.id);
+    /* 新消息使总数 +1；补齐的历史（seq ≤ 进房时的游标）已在 msgTotal 里，不加 */
+    if(st.msgTotal != null && m.seq > st.seqAtWelcome) st.msgTotal++;
     if(m.req_id && pending.has(m.req_id)){ pending.get(m.req_id).remove(); pending.delete(m.req_id); }
     const mine = (m.from && m.from !== '骰娘' && m.from === st.me);
     if(m.kind === 'sys' || m.kind === 'notice'){
@@ -39,6 +49,11 @@ export function createUI({code, onSubmit, onExport}){
       wrap.innerHTML =
         '<div class="av">' + Engine.esc((m.from || '?').slice(0, 1)) + '</div>' +
         '<div class="body"><div class="who">' + Engine.esc(m.from || '?') +
+        /* ★ 骰娘的回复必须写明「回应谁」—— 多人房间里一串「骰娘」气泡分不清是谁的指令
+         *   换来的结果（真机反馈：UncleMush 未绑卡时的 .st 回复、普通 .r 都一样）。
+         *   actor 是服务端落库时就写好的发起人（core.js：actor = m.actor || nick），
+         *   广播与补齐两条链路都带它 —— 这里只是把它显示出来，不加任何新字段。 */
+        replyTag(m) +
         '<span class="ts">' + hhmm(m.ts) + '</span></div>' +
         Engine.renderMsg(toRenderable(m)) + '</div>';
       $stream.appendChild(wrap);
@@ -81,8 +96,13 @@ export function createUI({code, onSubmit, onExport}){
     const bd = $('p-bd');
     bd.textContent = '裸骰 ' + (st.baredice ? '开' : '关');
     bd.classList.toggle('on', st.baredice);
-    $('p-cnt').textContent = seen.size + ' 条';
-    $('p-room').textContent = '房间 ' + st.code + (st.members.length ? (' · ' + st.members.length + ' 人') : '');
+    /* ★「已加载 / 总数」两个都要（用户已定）：只显示已加载条数，房间超过首屏 200 条时
+     *   会让人以为历史就这么点；只显示总数，又会与聊天流里的实际条数对不上（A8 那条）。 */
+    $('p-cnt').textContent = (st.msgTotal == null || st.msgTotal === seen.size)
+      ? (seen.size + ' 条')
+      : (seen.size + ' / ' + st.msgTotal + ' 条');
+    $('p-room').textContent = '房间 ' + st.code + ' · ' + st.online + ' 人在线' +
+      (st.total > st.online ? ('（累计 ' + st.total + '）') : '');
   }
 
   /* ---------- 事件（一律委托，不逐条挂监听 —— 重连时不会成倍泄漏） ---------- */
@@ -123,9 +143,25 @@ export function createUI({code, onSubmit, onExport}){
 
   return {
     append, appendPending, failPending, failAll, refreshTop, toBottom,
-    setRoom(r){ if(r.rule) st.rule = r.rule; if(r.baredice != null) st.baredice = !!r.baredice; refreshTop(); },
+    setRoom(r){
+      if(r.rule) st.rule = r.rule;
+      if(r.baredice != null) st.baredice = !!r.baredice;
+      if(r.msg_count != null) st.msgTotal = r.msg_count;
+      /* ★ 记住"进房时已分配到哪"，用来区分「补齐的历史」与「之后的新消息」：
+       *   seq ≤ 它的都已算进 msgTotal（补齐不该重复加），seq > 它的才是新到的，要 +1。 */
+      if(r.seq != null) st.seqAtWelcome = r.seq;
+      refreshTop();
+    },
     setMe(me){ st.me = me; refreshTop(); },
-    setMembers(list){ st.members = list || []; refreshTop(); },
+    /* ★ 在线人数与累计人次**分开收**：从前只收 members（累计人次）当在线数显示，
+     *   一个人反复刷新就一路累加 —— 现在 online 由服务端按 ws 连接数给出。 */
+    setMembers(list, online, total){
+      st.members = list || [];
+      if(online != null) st.online = online;
+      if(total != null) st.total = total;
+      else st.total = st.members.length;
+      refreshTop();
+    },
     note(html){ $stream.insertAdjacentHTML('beforeend', '<div class="notice">ⓘ ' + html + '</div>'); toBottom(); },
     clear(){ seen.clear(); $stream.innerHTML = ''; },
     get count(){ return seen.size; },

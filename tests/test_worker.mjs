@@ -8,12 +8,17 @@
  * 【★ 这节锁的是"PIN 固化"带来的三个后果】（档案已定：不可修改、不可找回）
  *   ① 只存摘要，不存明文 ② 错误口令必须被拒，且不泄露哪一位错 ③ token 过期即失效
  * ========================================================================== */
+import fs from 'node:fs';
+import path from 'node:path';
+import {fileURLToPath} from 'node:url';
 import * as Engine from '../packages/engine/src/index.js';
 import {hashPin, verifyPin, newSalt, signToken, verifyToken, TOKEN_TTL, newCode, isCode, isPin}
   from '../apps/worker/src/auth.js';
 import {toNdjson, fromNdjson, toBattle, exportAs, FORMAT} from '../apps/worker/src/export.js';
 import {createRoomCore} from '../apps/worker/src/core.js';
 import {createMemoryStorage} from './memory_storage.mjs';
+
+const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 let pass = 0, fail = 0;
 const ok = (n, c, extra) => { if(c) pass++; else { fail++; console.log('  ❌ ' + n + (extra ? ' :: ' + extra : '')); } };
@@ -120,6 +125,10 @@ console.log('== 5. 导出：战报与聊天流同源（★ 原则 4） ==');
   ok('★ 战报的 total 与气泡的 total 一致', md.includes('`' + total + '`'), 'total=' + total + '\n' + md);
   ok('★ HTML 气泡也含同一个 total', html.includes('→ ' + total));
   ok('战报提示 30 天清理（导出是唯一保全手段）', md.includes('30 天'));
+  /* ★ 多人房间的可追溯性：战报里只剩一行行文字，没有左右分列可依 —— 骰娘的每条回复
+   *   必须写明是回应谁的指令，否则复盘时"这颗骰是谁掷的"无从判断
+   *   （真机反馈 · 手机端：UncleMush 未绑卡时的 .st 回复、普通 .r 都一样没归属）。 */
+  ok('★ 战报写明骰娘这条回复是回应谁', /\*\*骰娘\*\* → \*\*老王\*\*/.test(md), md.split('\n').slice(-1)[0]);
   const out = exportAs([m], {code:'123456'}, FORMAT.MD);
   ok('md 导出的 content-type 正确', out.type.startsWith('text/markdown'));
   ok('ndjson 导出的 content-type 正确', exportAs([m], {code:'1'}, FORMAT.NDJSON).type.includes('ndjson'));
@@ -221,6 +230,30 @@ console.log('== 8. ★ html kind 必须带 defs（否则落库后是空气泡）
         'payload=' + JSON.stringify(m.payload));
     }
   }
+}
+
+console.log('== 9. ★ 在线人数：room.js（DO）不能用裸 length（真机反馈 · A 组第 3 条）==');
+/* 【为什么是静态扫描而不是真跑】room.js 依赖 cloudflare:workers，沙盒跑不了 DO。
+ *   但"在线数只增不减"这个坑**必须**有东西守 —— 它是源码写法决定的，扫源码就够。
+ * 【实测依据】workerd 真跑过：对端断开后 webSocketClose 里 getWebSockets() 仍包含那条
+ *   已关闭的连接 → 裸 length 让 online 只增不减。用 readyState === 1 过滤后确认为 1（正确）。 */
+{
+  const roomSrc = fs.readFileSync(path.join(ROOT, 'apps', 'worker', 'src', 'room.js'), 'utf8');
+  ok('★ 在线数按 readyState 过滤（不是 getWebSockets().length）',
+    /readyState\s*===\s*1/.test(roomSrc), '没找到 readyState 过滤');
+  // 三处取在线数的地方都必须走 onlineCount()，不能有一处漏网用裸 length
+  // ★ 先剥注释：room.js 的注释里正写着"不要写 getWebSockets().length"——不剥会误报
+  const codeOnly = roomSrc.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  const naked = codeOnly.match(/getWebSockets\(\)(?!\.filter)\.length/g) || [];
+  ok('★ 没有残留的裸 getWebSockets().length', naked.length === 0, '残留 ' + naked.length + ' 处');
+  ok('★ presence / welcome 都带 online 与 total 两个数',
+    /online:this\.onlineCount\(\)/.test(roomSrc) && /total:mem\.length/.test(roomSrc));
+  // core 侧：online 由 DO 注入，纯逻辑拿不到时必须留 null（不谎报 0）
+  const coreSrc = fs.readFileSync(path.join(ROOT, 'apps', 'worker', 'src', 'core.js'), 'utf8');
+  ok('★ core 的 online 来自注入（未注入 → null，不是 0）',
+    /onlineOf \? onlineOf\(\) : null/.test(coreSrc) && /memberCountOf \? memberCountOf\(\) : null/.test(coreSrc));
+  ok('★ 条数用注入的 msgCount（现存量 COUNT，不是 room.seq）',
+    /storage\.countMsgs\(\)/.test(coreSrc) && !/msgCount\s*[:=]\s*room\.seq/.test(coreSrc));
 }
 
 console.log('---------------------------');

@@ -29,7 +29,10 @@ export function createMockServer(code){
     join(nick){
       const anonId = 'a' + (++anonSeq);
       nicks.set(anonId, nick || '玩家');
-      return {anon_id:anonId, token:'tok-' + anonId};
+      /* ★ 必须把 nick 一并返回：core.apply 靠它填 msg.from / msg.actor。
+       *   少了它，替身产出的消息 from/actor 全为 undefined —— 与线上（room.js 从 members
+       *   表读 nick）不一致，任何"消息归属"类断言都会在替身里假绿或假红。 */
+      return {anon_id:anonId, token:'tok-' + anonId, nick:nick || '玩家'};
     },
     /** 处理一帧。返回 {me:[…只回本连接], all:[…广播给所有连接]} */
     async frame(f, who){
@@ -40,11 +43,12 @@ export function createMockServer(code){
         const room = await st.getRoom();
         const me = {me:[
           {t:OUT.WELCOME, v:PROTOCOL_VERSION, you:{anon_id:who.anonId, nick:f.nick || who.nick},
-           room:{rule:room.rule, baredice:!!room.baredice, seq:room.seq}, server_time:Date.now(), members:members()},
+           room:{rule:room.rule, baredice:!!room.baredice, seq:room.seq, msg_count:await st.countMsgs()},
+           server_time:Date.now(), members:members(), online:conns.size, total:members().length},
         ]};
         const r = await core.since(f.cursor || 0, 200);
         if(r.msgs.length) me.me.push({t:OUT.BATCH, msgs:r.msgs, cursor:r.cursor, has_more:r.has_more});
-        me.all = [{t:OUT.PRESENCE, members:members()}];
+        me.all = [{t:OUT.PRESENCE, members:members(), online:conns.size, total:members().length}];
         return me;
       }
       if(f.t === IN.PING) return {me:[{t:OUT.PONG, ts:f.ts}]};

@@ -196,6 +196,83 @@ console.log('== 8. 状态变更：切规则要留痕并回写前端 ==');
   ok('★ 换规则后提示卡不匹配（不静默）', r2.msgs.some(m => m.kind === 'notice'));
 }
 
+console.log('== 9. ★ 时间口径全链路统一 UTC+8（真机反馈 · A 组第 1 条） ==');
+{
+  /* 【症状】.status 里「规则设定者 · 08:12」与同一条消息气泡右上角「16:12」差 8 小时。
+   * 【根因】服务端 Worker 跑在 UTC，引擎用 getHours()；前端 ui.js 用浏览器本地时区。
+   * 【怎么让这条断言有意义】沙盒的 TZ 恰好也是 UTC+8 —— 不改 TZ 的话旧代码照样通过。
+   *   所以这里**强制把 TZ 拨到 UTC** 再算：修好后仍应是 UTC+8，改回去就变 UTC（会红）。 */
+  const oldTz = process.env.TZ;
+  process.env.TZ = 'UTC';
+  const TS = 1772000000000;
+  const utc8 = new Date(TS + 8 * 3600 * 1000);
+  const p = n => (n < 10 ? '0' : '') + n;
+  const want = p(utc8.getUTCHours()) + ':' + p(utc8.getUTCMinutes());
+  eq('★ hhmm(ts) 固定按 UTC+8（TZ 被拨到 UTC 也不变）', Engine.hhmm(TS), want);
+  eq('★ 战报与气泡同一格式化器', Engine.hhmm(TS), want);
+  // 旧写法（本地时区）在 TZ=UTC 下会给出 UTC 小时 —— 断言两端确实不再各算各的
+  const localHhmm = ts => { const d = new Date(ts); return p(d.getHours()) + ':' + p(d.getMinutes()); };
+  ok('★ 与"按本地时区渲染"不再同值（证明已脱钩）', localHhmm(TS) !== want, localHhmm(TS) + ' vs ' + want);
+  process.env.TZ = oldTz;
+
+  // .set rule 落库的时间串也必须是 UTC+8（它是服务端渲染后烤进消息的，事后改前端救不回来）
+  const {st, core} = mk();
+  const r = await run(core, 'tz1', '.set rule coc');
+  const sys = r.msgs.find(m => m.kind === 'sys');
+  /* ★ 用**同一条消息的 ts** 去推期望值：服务端渲染的时间串会被烤进 payload 落库，
+   *   事后改前端也救不回来 —— 所以必须在这里就锁死"它和气泡是同一个时钟"。 */
+  eq('★ 规则变更广播里的时间与 hhmm 同源（用同一条消息的 ts 推）',
+    sys.payload.line2.includes('于 ' + Engine.hhmm(sys.ts)), true);
+  eq('★ 落库的时间串也是 UTC+8（与气泡同一个时钟）',
+    (await st.getRoom()).ruleSetAt, Engine.hhmm(sys.ts));
+}
+
+console.log('== 10. ★ .status 的条数与在线人数（真机反馈 · A 组第 2/3 条） ==');
+{
+  const st = createMemoryStorage('R1A2B3');
+  let t = 1772000000000;
+  /* ★ online / memberCount 由 DO 注入（core 是纯逻辑，碰不到 ws 列表）。
+   *   不注入时必须是 — 而不是编一个 0 —— 保守：宁可少说，不可说错。 */
+  const core = createRoomCore(st, {now: () => (t += 100), online: () => 3, memberCount: () => 13});
+  const run2 = (reqId, text) => core.apply({reqId, text, anonId:'a1', nick:'老王'});
+  await run2('s1', '.r 1d6');
+  await run2('s2', '.r 1d6');
+  /* ★ 快照必须在 .status **之前**取：这条指令自己也会产出 2 条消息（原文 + 回复），
+   *   事后数会多 2 —— 拿"之后的总数"去比对"渲染时的显示值"必然不等，且会掩盖真错。 */
+  const cnt = await st.countMsgs();
+  const r = await run2('s3', '.status');
+  const html = Engine.defsHtml(r.msgs.find(m => m.kind === 'html').payload.defs);
+  const txt = String(html).replace(/<[^>]+>/g, ' ');
+  ok('★ 条数 = 现存量 COUNT(*)（不是 0、也不是 room.seq）',
+    txt.includes('本房间共 ' + cnt + ' 条'), 'cnt=' + cnt + ' txt=' + txt.replace(/\s+/g, ' ').slice(0, 160));
+  ok('★ 条数与"最近投掷条数"脱钩（旧口径恒为 0）', !/本房间共 0 条/.test(txt));
+  ok('★ 在线人数与累计人次分开显示', txt.includes('3 人在线') && txt.includes('累计接入 13 人次'),
+    txt.replace(/\s+/g, ' ').slice(0, 200));
+
+  // 未注入时应显示 — 而不是谎报 0
+  const core2 = createRoomCore(createMemoryStorage('R2'), {now: () => (t += 100)});
+  const r2 = await core2.apply({reqId:'n1', text:'.status', anonId:'a1', nick:'老王'});
+  const txt2 = String(Engine.defsHtml(r2.msgs.find(m => m.kind === 'html').payload.defs)).replace(/<[^>]+>/g, ' ');
+  ok('★ 拿不到在线数时显示 —（不谎报 0）', /在场人数\s+—/.test(txt2),
+    txt2.replace(/\s+/g, ' ').slice(0, 160));
+}
+
+console.log('== 11. ★ presence / welcome 帧带 online 与 total（两个数都要） ==');
+{
+  const {presence, welcome} = await import('../packages/protocol/src/frames.js');
+  const mem = [{anon_id:'a'}, {anon_id:'b'}, {anon_id:'c'}];
+  const pf = presence(mem, 2, 3);
+  eq('★ presence.online = 当前在线', pf.online, 2);
+  eq('★ presence.total  = 累计人次', pf.total, 3);
+  ok('★ online 可以小于 total（反复进房的人不重复计在线）', pf.online <= pf.total);
+  const wf = welcome({anon_id:'a'}, {rule:'generic'}, 0, mem, 1, 3);
+  eq('welcome.online', wf.online, 1);
+  eq('welcome.total', wf.total, 3);
+  // 服务端没给时退化为名单长度，不会 undefined（前端顶栏不会显示 NaN）
+  eq('★ 缺省退化：total = 名单长度', presence(mem).total, 3);
+  eq('★ 缺省退化：online = 0 而不是 undefined', presence(mem).online, 0);
+}
+
 console.log('---------------------------');
 console.log('协议层：通过 ' + pass + ' 项，失败 ' + fail + ' 项');
 if(fail) console.log('\n提示：失败项先分清是「协议逻辑错了」还是「测试替身与 DO 行为不一致」。');

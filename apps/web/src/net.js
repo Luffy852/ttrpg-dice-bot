@@ -85,7 +85,8 @@ export function createNet({code, token, nick, on = {}, backoffBase = 1000}){
     if(f.t === OUT.DUP)     return on.dup && on.dup(f.req_id, f.seq, f.deleted);
     if(f.t === OUT.REJECT)  return on.reject && on.reject(f.req_id, f.code);
     if(f.t === OUT.STATE)   return on.state && on.state(f.room);
-    if(f.t === OUT.PRESENCE)return on.presence && on.presence(f.members);
+    /* ★ online（当前 ws 连接数）与 total（累计人次）一起透传 —— 顶栏要分开显示两个数 */
+    if(f.t === OUT.PRESENCE)return on.presence && on.presence(f.members, f.online, f.total);
     if(f.t === OUT.ERROR)   return on.error && on.error(f.code);
   }
 

@@ -14,9 +14,13 @@ const FU_PACK = {
   family:'fu',
   supportsCheck:false,
   needsCard:false,
-  checkHint(){ return '最终物语不用 .rc —— 检定请用 <b>.fu dex ins 10</b>　·　<b>.fu d8 d10 10</b>　·　<b>.fu dex ins</b>（不判难度）'; },
+  /* ★ 无卡可用的写法排在前面（真机反馈 · A 组）：
+   *   提示里写 .fu dex ins 10 用的是**属性名**，而属性只有在绑卡后才有骰阶 ——
+   *   没绑卡时照抄这条会得到"尚未绑定角色卡（或卡上没有「敏捷」的骰阶）"，等于指错路。
+   *   骰阶字面量 .fu d8 d10 10 任何时候都能掷。 */
+  checkHint(){ return '最终物语不用 .rc —— 检定请用 <b>.fu d8 d10 10</b>（直接给骰阶，任何时候都能掷）　·　绑卡后可用 <b>.fu dex ins 10</b>　·　不判难度：<b>.fu d8 d10</b>'; },
   checkOffNote(ruleKey){
-    return '当前规则为「' + esc(RULE_META[ruleKey].name) + '」，检定用<b>两颗属性骰求和</b>而不是 .rc —— 请用 <b>.fu dex ins 10</b>；属性与骰阶清单见 <b>.rc list</b>。';
+    return '当前规则为「' + esc(RULE_META[ruleKey].name) + '」，检定用<b>两颗属性骰求和</b>而不是 .rc —— 请用 <b>.fu d8 d10 10</b>（绑卡后可用 <b>.fu dex ins 10</b>）；属性与骰阶清单见 <b>.rc list</b>。';
   },
   cardTemplate(){
     return {title:'尚未绑定角色卡', sections:[
@@ -25,7 +29,9 @@ const FU_PACK = {
         {k:'.st set 敏捷 d8 洞察 d10 力量 d8 意志 d6', v:'同上，中文写法'},
         {k:'.st set 物语点 3 物资点 2', v:'可选：两个备忘值（只记录、骰娘不自动增减）'}
       ]}
-    ], foot:['不绑卡也能掷 —— 直接给骰阶：<b>.fu dex ins 10</b>']};
+    /* ★ 说的是"直接给骰阶"，举的却必须是**骰阶**而不是属性名 ——
+     *   没绑卡时 dex/ins 没有骰阶，照抄 .fu dex ins 10 掷不出来（真机反馈 · A 组）。 */
+    ], foot:['不绑卡也能掷 —— 直接给骰阶：<b>.fu d8 d10 10</b>（属性名 dex/ins 需先绑卡才认）']};
   },
   parseCard(rest){
     const t = rest.trim().split(/\s+/).filter(Boolean);
@@ -65,20 +71,25 @@ const FU_PACK = {
     }).join('') + '</div>' + memoHtml;
   },
   listChecks(ruleKey, card){
-    const rows = FU_ATTRS.map(a => ({
-      k:a.zh + ' / ' + a.en.toUpperCase(),
-      v:'卡上骰阶：' + (card && card.family === 'fu' && typeof card.data[a.key] === 'number' ? 'd' + card.data[a.key] : '—') +
-        '　·　<b>.fu ' + a.en + ' ' + a.en + ' 10</b>'
-    }));
+    /* ★ 每个属性给的示例必须**此刻就能掷**：有卡 → 用属性名；无卡 → 只能给骰阶。
+     *   以前一律写 .fu dex dex 10，无卡时照抄掷不出来（真机反馈 · A 组）。 */
+    const rows = FU_ATTRS.map(a => {
+      const tier = (card && card.family === 'fu' && typeof card.data[a.key] === 'number') ? card.data[a.key] : null;
+      return {
+        k:a.zh + ' / ' + a.en.toUpperCase(),
+        v:'卡上骰阶：' + (tier ? 'd' + tier : '—（未绑定）') +
+          '　·　' + (tier ? ('<b>.fu ' + a.en + ' ' + a.en + ' 10</b>') : ('先 <b>.st set ' + a.zh + ' d8</b>，或直接掷 <b>.fu d8 d10 10</b>'))
+      };
+    });
     return {title:'📜 最终物语 · 四属性（本规则不用 .rc）', sections:[
       {h:'四属性骰阶（d6 / d8 / d10 / d12）', rows},
       {h:'难度参考（DL）', rows:[
         {k:'7',  v:'易'}, {k:'10', v:'普通'}, {k:'13', v:'困难'}, {k:'16', v:'极难'}
       ]}
     ], foot:[
-      '★ 最终物语没有属性检定 —— 请用 <b>.fu dex ins 10</b>（两颗属性骰求和 vs DL）',
-      'ℹ️ 同一个属性可用两次：<b>.fu dex dex 13</b>　·　不判难度：<b>.fu dex ins</b>',
-      'ℹ️ 无卡也能掷，直接给骰阶：<b>.fu d8 d10 10</b>'
+      '★ 最终物语没有属性检定 —— 请用 <b>.fu d8 d10 10</b>（两颗属性骰求和 vs DL）',
+      'ℹ️ 同一个骰阶可用两次：<b>.fu d8 d8 13</b>　·　不判难度：<b>.fu d8 d10</b>',
+      'ℹ️ 绑卡后可用属性名：<b>.fu dex ins 10</b>（属性名只在卡上有骰阶时才认）'
     ]};
   },
   verbs:{
@@ -111,9 +122,9 @@ const FU_PACK = {
         bad = t;
       });
       if(out) return out;
-      if(bad) return {notice:'参数看不懂：「' + esc(bad) + '」。格式：.fu <属性1> <属性2> [难度]　例：<b>.fu dex ins 10</b>'};
+      if(bad) return {notice:'参数看不懂：「' + esc(bad) + '」。格式：.fu <骰阶1> <骰阶2> [难度]　例：<b>.fu d8 d10 10</b>（绑卡后也可用属性名 .fu dex ins 10）'};
       if(modeBad) return {notice:'最终物语<b>没有优劣势机制</b> —— 需要重掷请直接再发一次同一条指令（v1 不追踪物语点）'};
-      if(slots.length < 2) return {notice:'需要两个骰阶：<b>.fu dex ins 10</b>（属性名或 d8 / d10 都行）'};
+      if(slots.length < 2) return {notice:'需要两个骰阶：<b>.fu d8 d10 10</b>（写 d8 / d10 直接用；绑卡后也可用属性名 dex / ins）'};
       const v1 = RNG.die(slots[0].tier), v2 = RNG.die(slots[1].tier);
       const groups = [
         {n:1, sides:slots[0].tier, sign:1, tries:[[v1]], kept:[v1], keptIdx:0, label:slots[0].short + ' d' + slots[0].tier, chip:slots[0].short},

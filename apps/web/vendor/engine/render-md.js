@@ -12,7 +12,7 @@
  * 【不做什么】不产出 HTML、不管时间格式以外的本地化、不做分页 —— 那是 apps/worker/export.js 的事。
  * ========================================================================== */
 import {detailLines} from './render.js';
-import {fmtMod} from './util.js';
+import {fmtMod, hhmm, ymd} from './util.js';
 import {viewFromPayload} from './replay.js';
 import {defsHtml} from './render.js';
 
@@ -72,16 +72,10 @@ export function renderMsgMd(m){
   return '';
 }
 
-function hhmmMd(ts){
-  const d = new Date(ts);
-  const p = n => (n < 10 ? '0' + n : String(n));
-  return p(d.getHours()) + ':' + p(d.getMinutes());
-}
-function ymdMd(ts){
-  const d = new Date(ts);
-  const p = n => (n < 10 ? '0' + n : String(n));
-  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
-}
+/* ★ 战报的时间与气泡、.status 用**同一个** UTC+8 格式化器（util.js）。
+ *   以前这里按本地时区、服务端按 UTC —— 同一场跑团导出的战报与当时屏幕上差 8 小时。 */
+const hhmmMd = hhmm;
+const ymdMd  = ymd;
 
 /** 服务端消息（payload 形态）→ 可渲染的 view 形态 */
 export function toRenderable(m){
@@ -114,7 +108,12 @@ export function renderBattleMd(msgs, meta){
     const d = ymdMd(m.ts);
     if(d !== day){ day = d; body.push('## ' + d, ''); }
     const r = toRenderable(m);
-    const who = (m.from === '骰娘') ? '**骰娘**' : ('**' + (m.actor || m.from || '?') + '**');
+    /* ★ 骰娘的每条回复都要写明「回应谁」—— 战报是事后复盘，聊天流里靠左右分列能猜，
+     *   战报里只剩一行行文字，不写发起人就无法还原"这颗骰是谁掷的"。
+     *   与 ui.js 的 replyTag 是同一个事实（m.actor）的两种外壳。 */
+    const who = (m.from === '骰娘')
+      ? ('**骰娘**' + ((m.actor && m.actor !== '骰娘') ? (' → **' + m.actor + '**') : ''))
+      : ('**' + (m.actor || m.from || '?') + '**');
     body.push('* `' + hhmmMd(m.ts) + '` ' + who + ' · ' + renderMsgMd(r));
   });
   return head.concat(body).join('\n') + '\n';

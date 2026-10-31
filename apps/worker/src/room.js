@@ -52,7 +52,15 @@ export class RoomDO extends DurableObject {
     super(ctx, env);
     this.ctx = ctx; this.env = env; this.sql = ctx.storage.sql;
     SCHEMA.forEach(s => this.sql.exec(s));
-    this.core = createRoomCore(this.storage(), {now: () => Date.now()});
+    /* ★ 在线人数 = **当前活跃 ws 连接数**（用户已定口径）。
+     * 【为什么不查 members 表的 last_seen】那是累计接入人次，永不减少 ——
+     *   一个人反复刷新/重连就一路累加（真机：3 人的房间显示 13 人）。
+     *   ws 连接数断线即减，且 DO 的 getWebSockets() 是权威事实（休眠恢复后也在）。 */
+    this.core = createRoomCore(this.storage(), {
+      now: () => Date.now(),
+      online: () => this.onlineCount(),
+      memberCount: () => this.memberCount(),
+    });
   }
 
   /* ---------- storage：core.js 需要的接口（与 memory_storage 逐方法对齐） ---------- */
@@ -122,6 +130,10 @@ export class RoomDO extends DurableObject {
         return q('SELECT * FROM messages WHERE kind = ? AND anon_id = ? ORDER BY seq DESC LIMIT ?', 'roll', anonId, n)
           .reverse().map(row2msg);
       },
+      /* ★ 现存量 COUNT(*)，不是 room.seq —— seq 删后不回退，30 天清理后会让 .status 的
+       *   「本房间共 N 条」一直虚高。idx_messages_ts 只是清理用的，COUNT 走主键全表扫，
+       *   单房间最多几百条，成本可忽略。 */
+      async countMsgs(){ return one('SELECT COUNT(*) AS c FROM messages').c; },
       async since(cursor, limit){
         return q('SELECT * FROM messages WHERE seq > ? ORDER BY seq LIMIT ?', cursor, limit).map(row2msg);
       },
@@ -231,13 +243,15 @@ export class RoomDO extends DurableObject {
     if(f.t === IN.HELLO){
       const room = await this.storage().getRoom();
       const me = this.sql.exec('SELECT nick FROM members WHERE anon_id = ?', anonId).toArray()[0] || {};
+      const mem = this.members();
       this.send(ws, {t:OUT.WELCOME, you:{anon_id:anonId, nick:f.nick || me.nick || '玩家'},
-        room:{rule:room.rule, baredice:!!room.baredice, seq:room.seq}, server_time:Date.now(),
-        members:this.sql.exec('SELECT anon_id, nick FROM members ORDER BY joined_at').toArray()});
+        room:{rule:room.rule, baredice:!!room.baredice, seq:room.seq, msg_count:await this.storage().countMsgs()},
+        server_time:Date.now(), members:mem,
+        online:this.onlineCount(), total:mem.length});
       // ★ 补齐：客户端上报它已渲染到哪（cursor），服务端只发它之后的 —— 不存服务端 cursor
       const r = await this.core.since(f.cursor || 0, 200);
       if(r.msgs.length) this.send(ws, {t:OUT.BATCH, msgs:r.msgs, cursor:r.cursor, has_more:r.has_more});
-      return this.broadcast({t:OUT.PRESENCE, members:this.members()}, ws);
+      return this.broadcast(this.presenceFrame(), ws);
     }
 
     if(f.t === IN.PING){ return this.send(ws, {t:OUT.PONG, ts:f.ts}); }
@@ -258,17 +272,29 @@ export class RoomDO extends DurableObject {
       this.send(ws, {t:OUT.ACK, req_id:f.req_id, seq:r.seq});
       this.broadcast({t:OUT.BATCH, msgs:r.msgs, cursor:r.msgs.length ? r.msgs[r.msgs.length - 1].seq : 0});
       if(r.state) this.broadcast({t:OUT.STATE, room:r.state});       // ★ 前端一律以后端为准回写
-      if(r.nick)  this.broadcast({t:OUT.PRESENCE, members:this.members()});
+      if(r.nick)  this.broadcast(this.presenceFrame());
       return;
     }
   }
   async webSocketClose(ws){
     ws.close(1000, 'bye');
-    this.broadcast({t:OUT.PRESENCE, members:this.members()});
+    this.broadcast(this.presenceFrame());
   }
-  async webSocketError(ws){ this.broadcast({t:OUT.PRESENCE, members:this.members()}); }
+  async webSocketError(ws){ this.broadcast(this.presenceFrame()); }
 
   members(){ return this.sql.exec('SELECT anon_id, nick FROM members ORDER BY joined_at').toArray(); }
+  memberCount(){ return this.sql.exec('SELECT COUNT(*) AS c FROM members').toArray()[0].c; }
+  /* ★ 在线 = **真正处于 OPEN 的连接数**，不是 getWebSockets().length。
+   * 【为什么必须过滤】实测（workerd 真跑）：对端断开后，webSocketClose 里读到的
+   *   getWebSockets() **仍包含那条已关闭的连接** —— 直接用 length 会让在线数只增不减，
+   *   正是"人数虚高"的老毛病的另一种形态（这次换成了 ws 连接却还是不减）。
+   *   readyState：1 = OPEN；2/3 是正在关 / 已关，都不算在场。 */
+  onlineCount(){ return this.ctx.getWebSockets().filter(s => s.readyState === 1).length; }
+  /** presence 帧：members（名单）+ online（ws 连接数）+ total（累计人次）—— 一个数都不要省 */
+  presenceFrame(){
+    const mem = this.members();
+    return {t:OUT.PRESENCE, members:mem, online:this.onlineCount(), total:mem.length};
+  }
   send(ws, obj){ try{ ws.send(JSON.stringify(obj)); }catch(e){ /* 连接已断，忽略 */ } }
   broadcast(obj, except){
     const s = JSON.stringify(obj);

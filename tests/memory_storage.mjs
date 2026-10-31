@@ -31,6 +31,9 @@ export function createMemoryStorage(code){
     async recentRolls(anonId, n){
       return msgs.filter(m => m.kind === 'roll' && m.anon_id === anonId).slice(-n);
     },
+    /* ★ 现存量 COUNT(*) —— 与 room.seq 的区别：seq 删后不回退，清理后会虚高。
+     *   这里是内存替身，直接用数组长度就是"现存量"（清理走 _deleteOlderThan，会同步删）。 */
+    async countMsgs(){ return msgs.length; },
     async since(cursor, limit){
       return msgs.filter(m => m.seq > cursor).slice(0, limit);   // ★ cursor = 已渲染的最大 seq，补齐是它之后
     },
