@@ -401,6 +401,7 @@ console.log('== 16. ★ 上翻分页的接线（服务端 why 标记 + 前端三
   const netSrc  = fs.readFileSync(path.join(ROOT, 'apps', 'web', 'src', 'net.js'), 'utf8');
   const mainSrc = fs.readFileSync(path.join(ROOT, 'apps', 'web', 'src', 'main.js'), 'utf8');
   const uiSrc   = fs.readFileSync(path.join(ROOT, 'apps', 'web', 'src', 'ui.js'), 'utf8');
+  const batchSrc = fs.readFileSync(path.join(ROOT, 'apps', 'web', 'src', 'batch.js'), 'utf8');
   /* ★ why 必须显式带：靠"oldest < cursor"去猜是分不出来的 ——
    *   首屏那批本身就是 200 条连续段，oldest 当然小于末尾，会被误判成"上翻的历史"，
    *   于是首屏不推进 cursor，重连反而漏掉中间段。 */
@@ -414,7 +415,11 @@ console.log('== 16. ★ 上翻分页的接线（服务端 why 标记 + 前端三
   ok('★ 上翻帧带 has_more（翻到底要能停）', /has_more:r\.msgs\.length >= \(f\.limit \|\| 200\)/.test(roomSrc));
   // 前端：历史帧不能推进 cursor（cursor 是"最新水位"，推进了重连会漏）
   ok('★ 上翻不推进 cursor', /if\(!isHistory\) cursor = Math\.max/.test(netSrc) && /f\.why === 'page'/.test(netSrc));
-  ok('★ 前端按 why 分三条路（page 插顶部，其余追加）', /w === 'page'/.test(mainSrc) && /ui\.prepend/.test(mainSrc) && /ui\.append/.test(mainSrc));
+  /* ★ 这段判断在 batch.js —— 生产 main.js 与冒烟测试**共用同一份**。
+   *   两份实现 = 两边各错各的：上次就是 main.js 用错字段名、测试副本用对的，全绿却真机失效。 */
+  ok('★ 批次分发在 batch.js（唯一实现）', /w === 'page'/.test(batchSrc) && /ui\.prepend/.test(batchSrc) && /ui\.append/.test(batchSrc));
+  ok('★ main.js 调用 batch.js，不自己另写一份', /applyBatch\(ui, msgs/.test(mainSrc));
+  ok('★ 冒烟测试也用 batch.js（两边不会漂移）', /applyBatch\(ui, f\.msgs/.test(fs.readFileSync(path.join(ROOT, 'tests', 'dom_smoke.js'), 'utf8')));
   // UI：插顶部必须保持滚动位置，否则手机上会跳
   ok('★ 上翻插在顶部（afterbegin）', /insertAdjacentHTML\('afterbegin'/.test(uiSrc));
   ok('★ 插完补回 scrollTop（不跳动）', /scrollTop = top \+ \(\$stream\.scrollHeight - before\)/.test(uiSrc));
@@ -461,6 +466,48 @@ console.log('== 18. ★ 上翻的健壮性：可见入口 + 不会永久卡住�
   ok('★ 加载中不会重复发请求', /if\(loading/.test(uiSrc));
   // 顺序：整批插入（逐条 afterbegin 会把一页历史完全倒过来）
   ok('★ 上翻整批插入（不是逐条 afterbegin）', /html \+= htmlOf\(m\)/.test(uiSrc) && /insertAdjacentHTML\('afterbegin', html\)/.test(uiSrc));
+}
+
+console.log('== 19. ★★ 首屏分页的接线字段名必须一致（真机事故 · D 组第 4 条）==');
+{
+  const netSrc   = fs.readFileSync(path.join(ROOT, 'apps', 'web', 'src', 'net.js'), 'utf8');
+  const mainSrc  = fs.readFileSync(path.join(ROOT, 'apps', 'web', 'src', 'main.js'), 'utf8');
+  const uiSrc    = fs.readFileSync(path.join(ROOT, 'apps', 'web', 'src', 'ui.js'), 'utf8');
+  const batchSrc = fs.readFileSync(path.join(ROOT, 'apps', 'web', 'src', 'batch.js'), 'utf8');
+  /* 【事故】net.js 给批次信息里那个字段叫 hasMoreOlder，而 main.js 首屏分支读成了 info.hasMore
+   *   → undefined → hasMoreOlder 恒为 false → 顶部入口不出现、滚到顶也不触发。
+   *   服务端分页本身完全正确，协议层测试也全绿（它直接调 setPaging，绕开了这层接线）。 */
+  ok('★ setPaging 改成收整个对象（不是三个位置参数）',
+    /function setPaging\(info\)/.test(uiSrc), 'ui.js');
+  ok('★ batch.js 两处都传 info 对象', (batchSrc.match(/ui\.setPaging\(info\)/g) || []).length >= 2);
+  /* 注释里提到 info.hasMore 是在**讲这个事故**，不算读；只查真正的代码（去掉注释后） */
+  const codeOf = t => t.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  ok('★ 没有再读 info.hasMore（那个字段根本不存在）',
+    !/info\.hasMore\b/.test(codeOf(mainSrc) + codeOf(batchSrc)));
+  /* ★ 兜底：就算服务端没给 has_more，只要"总数 > 已渲染条数"也要认为还有更早的。
+   *   宁可多给一次入口，也不能让用户对着"429 条只看到 204 条"无路可走。 */
+  ok('★ has_more 缺失时用"总数 > 已渲染"兜底', /st\.msgTotal > seen\.size/.test(uiSrc));
+  // 字段名对不上这件事本身要能被发现：net.js 与 ui.js 用的必须是同一个键名
+  const keys = [...netSrc.matchAll(/\b(why|oldest|total|hasMoreOlder):/g)].map(m => m[1]);
+  ok('★ net.js 批次信息里带了 hasMoreOlder', keys.includes('hasMoreOlder'), keys.join(','));
+  ok('★ ui.js 读的就是 hasMoreOlder（不是别的名字）', /o\.hasMoreOlder/.test(uiSrc));
+}
+
+console.log('== 20. ★ 昵称：改名要同步顶栏、空白登录不能冲掉昵称（真机反馈 · D 组第 2/3 条）==');
+{
+  const mainSrc = fs.readFileSync(path.join(ROOT, 'apps', 'web', 'src', 'main.js'), 'utf8');
+  const uiSrc   = fs.readFileSync(path.join(ROOT, 'apps', 'web', 'src', 'ui.js'), 'utf8');
+  /* ① 空白登录不能把昵称冲成"玩家"：老身份回来时前端默认"玩家" = 我要改名 */
+  ok('★ 进房表单空白时不默认成"玩家"', /const nick = \(\$\('g-nick'\)\.value \|\| ''\)\.trim\(\);/.test(mainSrc), 'g-join 分支');
+  ok('★ doJoin 把空白转成 null（让服务端判断"没填"）', /nick:nick \|\| null/.test(mainSrc));
+  /* ② 房间里改名（.name）后顶栏要跟着变：按 anon_id 在成员列表里找到自己 */
+  ok('★ 记住自己的 anon_id', /myAnon = \(f\.you && f\.you\.anon_id\)/.test(mainSrc));
+  ok('★ presence 里按 anon_id 找到自己并回写昵称', /m\.anon_id === myAnon/.test(mainSrc) && /ui\.setMe\(mine\.nick\)/.test(mainSrc));
+  ok('★ 改名后本地记住的昵称也更新（下次自动带入新名）', /rememberNick\(mine\.nick\)/.test(mainSrc));
+  ok('★ UI 暴露 me() 供比对', /me\(\)\{ return st\.me; \}/.test(uiSrc));
+  // ③ 服务端：没填昵称就不改库里的 nick
+  const roomSrc = fs.readFileSync(path.join(ROOT, 'apps', 'worker', 'src', 'room.js'), 'utf8');
+  ok('★ 只有真的填了昵称才写库', /if\(wantNick\) this\.sql\.exec\('UPDATE members SET nick/.test(roomSrc));
 }
 
 console.log('---------------------------');

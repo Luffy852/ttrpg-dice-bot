@@ -8,6 +8,7 @@
  *   漏看即永久锁死（无账号体系，无法验证创建人身份）。
  * ========================================================================== */
 import {createNet} from './net.js';
+import {applyBatch} from './batch.js';
 import {createUI} from './ui.js';
 
 const $ = id => document.getElementById(id);
@@ -48,6 +49,12 @@ const api = async (path, body) => {
 };
 
 let net = null, ui = null, room = null;    // room = {code, token, nick}
+let myAnon = null;                          // ★ 我的 anon_id：用来在成员列表里认出自己（改名同步要用）
+/** 记住昵称，下次打开首页自动带入；空值不覆盖 */
+function rememberNick(n){
+  if(!n) return;
+  try{ localStorage.setItem(NICK_KEY, n); }catch(e){}
+}
 
 function showApp(){
   $('gate').hidden = true;
@@ -93,23 +100,28 @@ function enter(r){
         ui.note('<b>连不上房间了</b>：请刷新页面重试。若反复如此，房间可能已过期（消息只保留 30 天）。');
         ui.failAll && ui.failAll('未送达');
       },
-      welcome(f){ ui.setRoom(f.room); ui.setMe(f.you.nick); ui.setMembers(f.members, f.online, f.total); },
-      /* ★ 三种 batch 走三条路：
-       *   first = 首屏（最近 200 条）→ 记下分页锚点；page = 上翻 → 插到顶部；live = 广播 → 追加到底。
-       *   不分清的话，上翻拿到的历史会被当成新消息追加到**底部** —— 顺序全乱。 */
-      batch(msgs, cursor, hasMore, info){
-        const w = (info && info.why) || 'live';
-        if(w === 'page'){
-          ui.prepend(msgs);
-          ui.doneLoadingOlder(!!(info && info.hasMoreOlder));
-          ui.setPaging(info && info.oldest, info && info.hasMoreOlder, null);
-        }else{
-          msgs.forEach(m => ui.append(m));
-          if(w === 'first') ui.setPaging(info && info.oldest, info && info.hasMore, info && info.total);
+      welcome(f){
+        myAnon = (f.you && f.you.anon_id) || null;
+        ui.setRoom(f.room); ui.setMe(f.you.nick); ui.setMembers(f.members, f.online, f.total);
+        rememberNick(f.you && f.you.nick);
+      },
+      /* ★ 三种 batch 走三条路：first = 首屏（记锚点）/ page = 上翻（插顶部）/ live = 广播（追到底）。
+       *   逻辑在 batch.js —— **生产与冒烟测试共用同一份**，不要再在这里另写一遍。 */
+      batch(msgs, cursor, hasMore, info){ applyBatch(ui, msgs, cursor, hasMore, info); },
+      state(s){ ui.setRoom(s); },                    // ★ 以后端为准回写，不乐观更新
+      /* ★ 房间里改名（.name）后，顶栏必须跟着变（真机反馈 · D 组第 3 条）
+       * 【症状】.name 改完，服务端与 .status 已经是新昵称，但顶栏还是旧的 ——
+       *   因为前端只在进房时拿过一次昵称，之后 presence 只用来显示人数。
+       * 【做法】presence 带 members（含 anon_id + nick），按 anon_id 找到自己并回写。
+       *   顺便把本地记住的昵称也更新 —— 否则下次打开首页自动带入的还是旧名。 */
+      presence(list, online, total){
+        ui.setMembers(list, online, total);
+        const mine = (list || []).find(m => myAnon && m.anon_id === myAnon);
+        if(mine && mine.nick && mine.nick !== ui.me()){
+          ui.setMe(mine.nick);
+          rememberNick(mine.nick);
         }
       },
-      state(s){ ui.setRoom(s); },                    // ★ 以后端为准回写，不乐观更新
-      presence(list, online, total){ ui.setMembers(list, online, total); },
       ack(){ /* 真实消息由 batch 到达；占位气泡到那时才移除 */ },
       /* ★ dup 帧**不带 batch**，所以绝对不能"什么都不做"地干等 ——
          占位气泡会永远停在"发送中"。正常路径下 batch 会先到、pending 那时已被移除，
@@ -164,7 +176,11 @@ function bindGate(){
 
   $('g-join-btn').addEventListener('click', async () => {
     const code = ($('g-code').value || '').trim();
-    const nick = ($('g-nick').value || '').trim() || '玩家';
+    /* ★ 空白就传空白（不要在这里默认成"玩家"）：
+     *   老身份回来时，前端默认"玩家"会被当成"我要改名叫玩家" ——
+     *   于是关页重进一次，房间里的昵称就被冲掉（真机：全部变成"玩家"）。
+     *   该不该改名由服务端判断：没填 = 沿用原昵称，填了 = 改名。 */
+    const nick = ($('g-nick').value || '').trim();
     if(!/^\d{6}$/.test(code)) return ($('g-err').textContent = '房间号是 6 位数字');
     try{ await doJoin(code, nick, $('g-pin').value); }
     catch(e){ $('g-err').textContent = (e.message === 'bad_pin' ? '口令不对' : (e.message === 'no_room' ? '房间不存在或已过期' : ('进不去：' + e.message))); }

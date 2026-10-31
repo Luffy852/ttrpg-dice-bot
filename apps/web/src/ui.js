@@ -111,10 +111,22 @@ export function createUI({code, onSubmit, onExport}){
   let oldestSeq = null, hasMoreOlder = false, loading = false;
   function onLoadOlder(fn){ loadOlder = fn; }
   let loadOlder = null;
-  function setPaging(oldest, more, total){
-    if(oldest != null) oldestSeq = (oldestSeq == null ? oldest : Math.min(oldestSeq, oldest));
-    if(more != null) hasMoreOlder = !!more;
-    if(total != null) st.msgTotal = total;
+  /* ★ 整个分页状态**一次传对象**，不逐字段传参（真机事故 · D 组第 4 条）
+   * 【原写法】ui.setPaging(info.oldest, info.hasMore, info.total) —— 三个位置参数，
+   *   而 net.js 里那个字段叫 hasMoreOlder。首屏分支写成了 info.hasMore（undefined），
+   *   于是 hasMoreOlder 一直是 false：**入口不出现、滚到顶也不触发**，
+   *   而服务端分页完全正常，协议层测试也全绿 —— 因为测试直接调 setPaging，绕开了这层接线。
+   * 【为什么改成对象】位置参数 + 两边各起一个名字 = 迟早再错一次。
+   *   传对象后，拼错字段名只会变成 undefined（且下面有兜底），不会再"静默什么都不做"。 */
+  function setPaging(info){
+    const o = info || {};
+    if(o.oldest != null) oldestSeq = (oldestSeq == null ? o.oldest : Math.min(oldestSeq, o.oldest));
+    if(o.total != null) st.msgTotal = o.total;
+    /* ★ 兜底：就算服务端没给 has_more，只要"总数 > 我已渲染的条数"也说明还有更早的。
+   *   宁可多给一次入口，也不能让用户面对"明明有 429 条却只能看 204 条"而无路可走。 */
+    const more = (o.hasMoreOlder != null) ? !!o.hasMoreOlder
+      : (st.msgTotal != null && st.msgTotal > seen.size);
+    hasMoreOlder = more;
     refreshLoadBtn();
     refreshTop();
   }
@@ -222,6 +234,7 @@ export function createUI({code, onSubmit, onExport}){
       refreshTop();
     },
     setMe(me){ st.me = me; refreshTop(); },
+    me(){ return st.me; },      // ★ 供上层比对"顶栏现在显示的昵称是不是最新的我"
     /* ★ 在线人数与累计人次**分开收**：从前只收 members（累计人次）当在线数显示，
      *   一个人反复刷新就一路累加 —— 现在 online 由服务端按 ws 连接数给出。 */
     setMembers(list, online, total){

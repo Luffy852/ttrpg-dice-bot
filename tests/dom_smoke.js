@@ -93,6 +93,7 @@ async function boot(){
   // 顺序等价于 main.js 的 module graph；用动态 import 直接跑生产代码
   const {createNet} = await import('../apps/web/src/net.js');
   const {createUI} = await import('../apps/web/src/ui.js');
+  const {applyBatch} = await import('../apps/web/src/batch.js');
   const server = w.__SERVER__;
   const me = server.join('老王');
 
@@ -108,7 +109,9 @@ async function boot(){
   function route(f){
     const n = net;
     if(f.t === OUT.WELCOME){ ui.setRoom(f.room); ui.setMe(f.you.nick); ui.setMembers(f.members); }
-    else if(f.t === OUT.BATCH){ f.msgs.forEach(m => ui.append(m)); }
+    /* ★ 与生产 main.js 共用 batch.js —— 不在这里另写一份判断，
+     *   否则"测试用副本、真机用原版"，两边漂移就是上次上翻失效的元凶。 */
+    else if(f.t === OUT.BATCH){ applyBatch(ui, f.msgs, f.cursor, f.has_more, {why:f.why, oldest:f.oldest, total:f.total, hasMoreOlder:!!f.has_more}); }
     else if(f.t === OUT.STATE){ ui.setRoom(f.room); }
     else if(f.t === OUT.PRESENCE){ ui.setMembers(f.members); }
     else if(f.t === OUT.REJECT){ ui.failPending(f.req_id, f.code); }
@@ -123,6 +126,9 @@ async function boot(){
     onSubmit(text){ const reqId = net.send(text); ui.appendPending(reqId, text); },
     onExport(){},
   });
+  /* ★ 把 route 暴露出去：外层要做"真机路径"回归 —— 一个帧从 ws 进来走完整链路，
+   *   不能只测直接调 ui 方法（上次上翻失效就是这么漏掉的）。 */
+  w.__route__ = route;
   const net = createNet({code:'123456', token:'tok-test', nick:'老王', on:{}});
   w.__net__ = Object.assign(w.__net__, {send:net.send});
   // createNet 内部会 new WebSocket(url) —— 已被替换为内存连接
@@ -300,7 +306,7 @@ function type(ui, net, text){
     ok('★ 没有分页信息时，滚到顶不发请求', asked === null, String(asked));
 
     // ② 首屏：最近 N 条 + 有更早的 → 滚到顶应发出请求，锚点 = 首屏最小 seq
-    ui2.setPaging(50, true, 402);
+    ui2.setPaging({oldest:50, hasMoreOlder:true, total:402});
     stream.scrollTop = 0;
     stream.dispatchEvent(new w.Event('scroll'));
     await sleep(5);
@@ -321,7 +327,7 @@ function type(ui, net, text){
     await sleep(5);
     ok('★ 没有更早的之后不再发请求', asked === null, String(asked));
     // ⑤ 不在顶部时不发请求
-    ui2.setPaging(20, true, 402);
+    ui2.setPaging({oldest:20, hasMoreOlder:true, total:402});
     asked = null;
     stream.scrollTop = 999;
     stream.dispatchEvent(new w.Event('scroll'));
@@ -330,7 +336,7 @@ function type(ui, net, text){
 
     /* ⑥ 顶部必须有一个**能点的**入口：滚动触发在部分浏览器 / 手势下不灵，
      *   那时若没有按钮，用户就完全拿不到更早的历史，只会以为消息丢了。 */
-    ui2.setPaging(20, true, 402);
+    ui2.setPaging({oldest:20, hasMoreOlder:true, total:402});
     const btn = d.querySelector('#stream .loadbtn');
     ok('★ 还有更早的时，顶部出现可点入口', !!btn, btn ? btn.textContent : '(没有)');
     ok('★ 入口在消息流最顶部（不会被上翻插入的内容顶下去）',
@@ -340,8 +346,15 @@ function type(ui, net, text){
     btn && btn.dispatchEvent(new w.Event('click'));
     await sleep(5);
     ok('★ 点入口能加载（不受滚动位置限制）', asked === 20, String(asked));
+    /* ⑥′ 兜底：服务端没给 has_more，但"总数 > 已渲染条数"时也要认为还有更早的。
+     *   字段名对不上（上次的事故）或老版本服务端不发这个字段时，这一条就是最后的安全网 ——
+     *   宁可多给一次入口，也不能让用户对着"429 条只看到 204 条"无路可走。 */
+    ui2.setPaging({oldest:5, total:999});
+    ok('★ has_more 缺失时靠"总数 > 已渲染"兜底出入口',
+      !!d.querySelector('#stream .loadbtn'), '（兜底未生效 = 用户会以为消息丢了）');
+
     // ⑦ 加载标志不会永久卡住（服务端没回声时，超时后要解锁，否则从此再也翻不动）
-    ui2.setPaging(10, true, 402);
+    ui2.setPaging({oldest:10, hasMoreOlder:true, total:402});
     stream.scrollTop = 0;
     stream.dispatchEvent(new w.Event('scroll'));   // → loading = true
     await sleep(5);
@@ -349,6 +362,31 @@ function type(ui, net, text){
     stream.dispatchEvent(new w.Event('scroll'));
     await sleep(5);
     ok('★ 加载中不会重复发请求', asked === null, String(asked));
+  }
+
+  /* ★★ 真机路径回归（D 组第 4 条的事故就出在这一层）★★
+   *   上面那些是直接调 ui 的方法；这里要**像真机那样**：一个首屏 batch 帧从 ws 进来，
+   *   经 route → batch.js → ui，最后页面上必须真的出现"加载更早"的入口。
+   *   上次正是因为只测了前者，才漏掉 net.js 与 main.js 字段名不一致的问题。 */
+  {
+    const stream = d.getElementById('stream');
+    const firstMsgs = [];
+    for(let i = 300; i < 500; i++) firstMsgs.push({seq:i, id:'fb-' + i, ts:Date.now(), kind:'chat',
+      from:'老王', actor:'老王', anon_id:'a1', req_id:null, rule_at:'generic', payload:{text:'M' + i}});
+    w.__route__({t:OUT.BATCH, why:'first', msgs:firstMsgs, cursor:500, has_more:true, oldest:300, total:429});
+    await sleep(10);
+    ok('★ 首屏帧进来后，页面顶部出现"加载更早"入口',
+      !!d.querySelector('#stream .loadbtn'), d.querySelector('#stream .loadbtn') ? d.querySelector('#stream .loadbtn').textContent : '(没有)');
+    // 入口上要写明还有多少条，用户才知道"不是消息丢了"
+    ok('★ 入口标出还有多少条没加载', /还有 \d+ 条/.test((d.querySelector('#stream .loadbtn') || {}).textContent || ''),
+      (d.querySelector('#stream .loadbtn') || {}).textContent);
+    // 滚到顶要真的发请求
+    let askedSeq = null;
+    ui.onLoadOlder(seq => { askedSeq = seq; });
+    stream.scrollTop = 0;
+    stream.dispatchEvent(new w.Event('scroll'));
+    await sleep(10);
+    ok('★ 真机路径下滚到顶会真的去取更早的一页', askedSeq === 300, String(askedSeq));
   }
 
   /* ★ 上翻插入的顺序：整批插入，历史必须正序（不能倒着来） */
