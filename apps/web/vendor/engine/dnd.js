@@ -7,6 +7,17 @@ import { ruleFamily } from './rules.js';
 
 const ABIL_KEYS = ['str','dex','con','int','wis','cha'];
 const ABIL_ZH   = {str:'力量', dex:'敏捷', con:'体质', int:'智力', wis:'感知', cha:'魅力'};
+/* ★ 护甲等级 AC：与 COC 的 HP/SAN、FU 的 IP 一样，是**静态数据**不是骰阶（真机反馈 · 第 5 条）
+ * 【为什么不并入属性】AC 不是六属性之一，也不参与 .rc 检定 —— 它是"被打到时要不要中"的阈值，
+ *   属性是"掷骰时加多少"。混进属性表会让 .rc list 多出一项根本不能检定的名字。
+ * 【为什么不是派生值】10 + 敏捷调整值只是**无甲时的默认值**；穿了皮甲 / 板甲、有盾、
+ *   有法师护甲，AC 各不相同 —— 骰娘没有装备表，推不出来，所以必须让玩家自己填。
+ *   若由系统按敏捷算，穿重甲的战士会被算成 AC 12，那是错的且错得很隐蔽。 */
+const DND_STATIC = [
+  {key:'ac', zh:'护甲等级', en:'AC', aliases:['ac','护甲','护甲等级','护甲值','ac值','armor','armorclass',' armor']},
+  {key:'hp', zh:'生命值',   en:'HP', aliases:['hp','生命','生命值','血量','hp值','hitpoints','hit points']}
+];
+const DND_STATIC_SET = new Set(DND_STATIC.map(x => x.key));
 function abilityMod(score){ return Math.floor((score - 10) / 2); }
 function profFromLv(lv){
   if(!(lv >= 1)) return null;
@@ -62,4 +73,6 @@ DND_SKILLS.forEach(s => { [s.zh, s.en, s.abbr].concat(s.alt || []).forEach(k => 
  *   卡上没写过、但用户自定义的名字照样能掷 —— 见 lookupCocSkill()。
  */
 
-export { ABIL_KEYS, ABIL_ZH, abilityMod, profFromLv, DND_ABILITIES, DND_SKILLS, SKILL_INDEX };
+/* ★ 必须单行：load-engine.js 是**按正则剥 import/export 再拼成一个文件**的，
+ *   多行 export 会漏掉后半截 → 整个引擎语法错误（刚才就炸了一次）。 */
+export { DND_STATIC, DND_STATIC_SET, ABIL_KEYS, ABIL_ZH, abilityMod, profFromLv, DND_ABILITIES, DND_SKILLS, SKILL_INDEX };

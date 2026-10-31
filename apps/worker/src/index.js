@@ -123,7 +123,7 @@ export default {
       return JSON_({code:r.code, has_pin:r.has_pin, pin:(body.pin && isPin(body.pin)) ? String(body.pin) : null});
     }
 
-    let m = url.pathname.match(/^\/api\/room\/(\d{6})(\/join|\/meta|\/history|\/export)?$/);
+    let m = url.pathname.match(/^\/api\/room\/(\d{6})(\/join|\/meta|\/history|\/export|\/import)?$/);
     if(m){
       const code = m[1], sub = m[2] || '';
       const stub = stubOf(env, code);
@@ -142,6 +142,15 @@ export default {
       if(sub === '/export'){
         const r = await doFetch(stub, '/export?' + url.searchParams.toString());
         return new Response(r.body, {headers:r.headers});
+      }
+      /* ★ 导入：必须把**整个 body 原文**转过去。
+       *   战报文本可能很长（几百条消息），在网关解一次再重新序列化既浪费又可能改坏内容；
+       *   而且只在 POST 时转发 —— 没有 body 的 GET 会得到 400，不必让 DO 白跑一趟。 */
+      if(sub === '/import' && request.method === 'POST'){
+        /* ★ token 在**查询串**里，必须一起转发：只转 body 的话 DO 侧拿不到 token →
+         *   bad_token。/export 那边是拼了 searchParams 的，这里漏了就会 401。 */
+        return JSON_(await (await doFetch(stub, '/import?' + url.searchParams.toString(),
+          {method:'POST', body:await request.text()})).json());
       }
       return JSON_({error:'bad_sub'}, 404);
     }

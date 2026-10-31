@@ -29,4 +29,12 @@ function ymd(d){
   return t.getUTCFullYear() + '-' + p(t.getUTCMonth() + 1) + '-' + p(t.getUTCDate());
 }
 
-export { esc, fmtMod, hhmm, ymd };
+/** ★ epoch → 'YYYY-MM-DD HH:MM'（UTC+8）—— 导出时间戳专用
+ * 【为什么必须走这里】导出时间戳原来用 `new Date().toISOString()`，那是 **UTC**。
+ *   于是同一份战报：消息时间是 UTC+8、底部"导出：xxx"是 UTC，同一份文件里两个时区
+ *   （真机反馈 · 第 6 条）。三处渲染统一走 util 的 +8 偏移，这里补第四个。 */
+function ymdhm(d){
+  return ymd(d) + ' ' + hhmm(d);
+}
+
+export { esc, fmtMod, hhmm, ymd, ymdhm };

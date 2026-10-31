@@ -17,7 +17,8 @@
 import {DurableObject} from 'cloudflare:workers';
 import {createRoomCore} from './core.js';
 import {checkIn, IN, ERR, OUT} from '../../../packages/protocol/src/frames.js';
-import {exportAs, FORMAT} from './export.js';
+import {exportAs, FORMAT, fromNdjson} from './export.js';
+import {ymdhm} from '../../../packages/engine/src/util.js';
 import {verifyToken, verifyPin, newSalt, hashPin, signToken, TOKEN_TTL} from './auth.js';
 
 const DAY = 86400000;
@@ -173,6 +174,14 @@ export class RoomDO extends DurableObject {
        *   「本房间共 N 条」一直虚高。idx_messages_ts 只是清理用的，COUNT 走主键全表扫，
        *   单房间最多几百条，成本可忽略。 */
       async countMsgs(){ return one('SELECT COUNT(*) AS c FROM messages').c; },
+      /* ★ 导入用：当前最大 seq（导入的消息接在它后面） */
+      async maxSeq(){ const r = one('SELECT MAX(seq) AS s FROM messages'); return (r && r.s) || 0; },
+      /* ★ 导入去重：已存在的 msg_id 一律跳过（重名即同一条消息，重复导入不该翻倍） */
+      async hasIds(ids){
+        const out = new Set();
+        ids.forEach(id => { if(one('SELECT 1 FROM messages WHERE id = ?', id)) out.add(id); });
+        return out;
+      },
       async since(cursor, limit){
         return q('SELECT * FROM messages WHERE seq > ? ORDER BY seq LIMIT ?', cursor, limit).map(row2msg);
       },
@@ -275,6 +284,35 @@ export class RoomDO extends DurableObject {
       return Response.json(r);
     }
 
+    /* ★ 导入：把 NDJSON 战报灌回**当前房间**（用户已定口径 · 真机反馈第 8 条）
+     *  【为什么接在后面而不是"恢复成原样"]seq 是房间内的单调递增游标，
+     *   重排现有消息会让已经在别人页面上的 seq 全部错位（补齐与重连都以 seq 为准）。
+     *   接在后面 + 按 msg_id 去重 = 安全且幂等的"补回"。
+     *  【为什么按 id 去重而不是 seq】导出的 msg_id 是全局唯一且稳定的；
+     *   seq 在导入后会被重排，拿它去重第二次就失效了。 */
+    if(url.pathname === '/import'){
+      const v = await verifyToken(url.searchParams.get('token'), this.env.PIN_SECRET);
+      if(!v.ok) return Response.json({error:v.why}, {status:401});
+      let body = {};
+      try{ body = await req.json(); }catch(e){ return Response.json({error:'bad_body'}, {status:400}); }
+      const parsed = fromNdjson(String(body.text || ''));
+      const st = this.storage();
+      const dup = await st.hasIds(parsed.msgs.map(m => m.id));
+      const fresh = parsed.msgs.filter(m => !dup.has(m.id));
+      let base = await st.maxSeq();
+      const list = fresh.map(m => Object.assign({}, m, {seq:++base}));
+      if(list.length){
+        try{ await st.insertMsgs(list); }
+        catch(e){ return Response.json({error:'write_failed', why:String(e.message || e)}, {status:500}); }
+        this.sql.exec('UPDATE room SET seq = ? WHERE id = 1', base);
+      }
+      /* ★ 导入的消息要给所有人看见：否则导入者自己刷新看得到、别人看不到，
+       *   下一句指令才会把它挤出来 —— 那种"时有时无"最难排查。 */
+      if(list.length) this.broadcast({t:OUT.BATCH, msgs:list, cursor:base});
+      return Response.json({imported:list.length, skipped:dup.size,
+        errors:parsed.errs, total:await st.countMsgs()});
+    }
+
     if(url.pathname === '/export'){
       const t = url.searchParams.get('token');
       const v = await verifyToken(t, this.env.PIN_SECRET);
@@ -284,7 +322,9 @@ export class RoomDO extends DurableObject {
                     anon_id:r.anon_id, req_id:r.req_id, rule_at:r.rule_at, payload:JSON.parse(r.payload)}));
       const room = this.sql.exec('SELECT rule FROM room WHERE id = 1').toArray()[0] || {};
       const out = exportAs(all, {code:this.code, rule:room.rule,
-        exportedAt:new Date().toISOString().slice(0, 16).replace('T', ' ')},
+        /* ★ 与消息时间同一个 UTC+8 格式化器：原来用 toISOString（UTC），
+         *   同一份战报里"导出时间"与"消息时间"差 8 小时（真机反馈 · 第 6 条）。 */
+        exportedAt:ymdhm(Date.now())},
         (url.searchParams.get('format') === FORMAT.MD) ? FORMAT.MD : FORMAT.NDJSON);
       return new Response(out.body, {headers:{'content-type':out.type,
         'content-disposition':'attachment; filename="' + out.name + '"'}});

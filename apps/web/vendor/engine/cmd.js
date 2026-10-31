@@ -198,7 +198,10 @@ function handleCommand(text, ctx){
     const onl = (room.online == null) ? null : room.online;
     const mem = (room.members == null) ? null : room.members;
     page(defsHtml({title:'📋 当前状态', rows:[
-      {k:'房间规则',   v:RULE_META[room.rule].name + '（' + room.rule + '）'},
+      /* ★ 只写规则名（真机反馈 · 第 4 条）：那个括号里的"规则键"（如 dnd5r）
+       *   是给机器用的标识，玩家看不懂也不需要 —— 而且它与规则名放在一起，
+       *   容易被当成"规则名的一部分"，照着输指令反而输错。 */
+      {k:'房间规则',   v:RULE_META[room.rule].name},
       {k:'规则设定者', v:room.ruleSetBy ? (esc(room.ruleSetBy) + ' · ' + esc(room.ruleSetAt)) : '（尚未修改过）'},
       {k:'我的昵称',   v:esc(me)},
       {k:'裸骰识别',   v:(room.baredice ? '开' : '关') + '　（.set baredice on 开启）'},

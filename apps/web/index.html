@@ -5,7 +5,7 @@
 <!-- interactive-widget=resizes-content：Chrome/Android 上键盘弹出时压缩视口而非遮盖内容。
      不支持的浏览器（iOS Safari、WebView）由下面 visualViewport 兜底。 -->
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content">
-<title>骰娘 M2 · 单机可摸版</title>
+<title>TRPG · 骰娘在线</title>
 <style>
 :root{
   --bg:#f4f5f7; --panel:#fff; --line:#e3e6ea; --tx:#1f2328; --tx2:#6b7280; --tx3:#9aa2ad;
@@ -212,7 +212,7 @@ body{
 <div id="app" hidden>
   <header id="topbar">
     <div class="r1">
-      <span class="title">🎲 骰娘 M2 · 单机可摸版</span>
+      <span class="title">🎲 TRPG · 骰娘在线</span>
       <span class="pill" id="p-rule">通用</span>
       <span class="pill me" id="p-me">玩家</span>
       <span class="pill" id="p-bd">裸骰 关</span>
@@ -229,6 +229,8 @@ body{
       <button class="quick" data-cmd=".h">.h</button>
       <button class="quick" data-cmd=".set baredice on">.set baredice on</button>
       <button class="quick" id="btn-export">导出战报</button>
+      <button class="quick" id="btn-import">导入战报</button>
+      <input type="file" id="file-import" accept=".ndjson,.json,.txt" hidden>
     </div>
   </header>
 

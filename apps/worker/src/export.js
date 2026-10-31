@@ -44,6 +44,8 @@ export const FORMAT = {NDJSON:'ndjson', MD:'md'};
 export function exportAs(msgs, meta, format){
   if(format === FORMAT.MD) return {body:toBattle(msgs, meta), type:'text/markdown; charset=utf-8',
     name:'战报-' + (meta.code || 'room') + '.md'};
+  /* ★ 文件名带导出时间：多次导出会拿到多个同名文件，下载目录里全是"房间-593353 (1).ndjson"，
+   *   分不清哪份是新的。时间串与战报里的 exportedAt 一致（都走 ymdhm）。 */
   return {body:toNdjson(msgs), type:'application/x-ndjson; charset=utf-8',
-    name:'房间-' + (meta.code || 'room') + '.ndjson'};
+    name:'房间-' + (meta.code || 'room') + '-' + String(meta.exportedAt || '').replace(/[^0-9]/g, '') + '.ndjson'};
 }

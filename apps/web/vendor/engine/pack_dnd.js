@@ -21,10 +21,13 @@ const DND_PACK = {
   cardTemplate(){
     return {title:'尚未绑定角色卡', sections:[
       {h:'复制下面这行、改数字后发送即可（中英文都认）', rows:[
-        {k:'.st set 力量 16 敏捷 14 体质 15 智力 10 感知 12 魅力 8 等级 5', v:'顺序：力量 敏捷 体质 智力 感知 魅力 等级'},
-        {k:'.st set str 16 dex 14 con 15 int 10 wis 12 cha 8 lv 5', v:'同上，英文写法'}
+        {k:'.st set 力量 16 敏捷 14 体质 15 智力 10 感知 12 魅力 8 等级 5 ac 16 hp 24', v:'顺序：力量 敏捷 体质 智力 感知 魅力 等级 + 护甲等级 生命值'},
+        {k:'.st set str 16 dex 14 con 15 int 10 wis 12 cha 8 lv 5', v:'同上，英文写法（AC / HP 可省略）'}
       ]}
-    ], foot:['等级用于推导熟练加值，可省略']};
+    ], foot:['等级用于推导熟练加值，可省略',
+      /* ★ 必须说清 AC 是**手填**的：玩家习惯"AC = 10 + 敏捷"，
+       *   而骰娘没有装备表推不出来 —— 不说的话会有人以为"没显示就是骰娘算错了"。 */
+      '护甲等级 AC 需自己填（骰娘没有装备表，无法按盔甲 / 盾牌推算）；生命值 HP 同理，只作备忘，骰娘不会自动增减']};
   },
   parseCard(rest){ return parseCardSet(rest); },
   renderCard(card){ return renderCardHtml(card); },

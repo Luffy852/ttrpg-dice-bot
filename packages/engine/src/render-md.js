@@ -68,8 +68,34 @@ export function renderMsgMd(m){
   if(m.kind === 'notice') return '> ⓘ ' + String(m.html || '').replace(/<[^>]+>/g, '');
   if(m.kind === 'cmd')    return '`' + (m.text || '') + '`';
   if(m.kind === 'chat')   return (m.text || '');
-  if(m.kind === 'html')   return '（结构化说明 · 导出用 NDJSON 保留完整内容）';
+  /* ★ 结构化说明（角色卡 / .help / .status 这些）**必须**导出成能读的文字（真机反馈 · 第 7 条）
+   * 【原行为】只写一行"结构化说明 · 导出用 NDJSON 保留完整内容" ——
+   *   于是战报里 .st / .status / 规则切换提示全是这一句占位，复盘时等于没有。
+   *   用户还得再去找 NDJSON 文件，而那份是机器格式，人根本没法看。
+   * 【做法】defs 本来就是结构化的 {title, sections[{h, rows[{k,v}]}], foot}，
+   *   转成 Markdown 是自然的：标题 → 引用块，分节 → 小标题，行 → 列表项。
+   *   注意 v 里可能带 HTML 标签（提示里的 <b>），要剥掉 —— 战报里没有样式可用。 */
+  if(m.kind === 'html')   return defsMd(m);
   return '';
+}
+
+/** defs（结构化说明）→ Markdown。与 defsHtml 是同一份数据的两种外壳（原则 4） */
+export function defsMd(m){
+  const d = (m && (m.defs || (m.payload && m.payload.defs))) || null;
+  if(!d) return '';
+  const strip = h => String(h || '').replace(/<br\s*\/?>/g, ' ').replace(/<[^>]+>/g, '')
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&').replace(/&nbsp;/g, ' ').trim();
+  const out = [];
+  if(d.title) out.push('> **' + strip(d.title) + '**');
+  (d.sections || [{rows:d.rows}]).forEach(sec => {
+    if(sec && sec.h) out.push('> ##### ' + strip(sec.h));
+    (sec && sec.rows || []).forEach(r => {
+      const k = strip(r && r.k), v = strip(r && r.v);
+      if(k || v) out.push('> - ' + (k ? ('**' + k + '**' + (v ? '：' : '')) : '') + v);
+    });
+  });
+  (d.foot || []).forEach(f => { const t = strip(f); if(t) out.push('> - ⓘ ' + t); });
+  return out.join('\n');
 }
 
 /* ★ 战报的时间与气泡、.status 用**同一个** UTC+8 格式化器（util.js）。

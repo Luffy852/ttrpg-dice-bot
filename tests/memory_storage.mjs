@@ -36,6 +36,8 @@ export function createMemoryStorage(code){
     /* ★ 现存量 COUNT(*) —— 与 room.seq 的区别：seq 删后不回退，清理后会虚高。
      *   这里是内存替身，直接用数组长度就是"现存量"（清理走 _deleteOlderThan，会同步删）。 */
     async countMsgs(){ return msgs.length; },
+    async maxSeq(){ return msgs.length ? msgs[msgs.length - 1].seq : 0; },
+    async hasIds(ids){ const has = new Set(msgs.map(m => m.id)); return new Set((ids || []).filter(i => has.has(i))); },
     async since(cursor, limit){
       return msgs.filter(m => m.seq > cursor).slice(0, limit);   // ★ cursor = 已渲染的最大 seq，补齐是它之后
     },

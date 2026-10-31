@@ -31,11 +31,20 @@ html = html.slice(0, s0) +
   '<script type="module" src="./src/main.js"></script>' +
   html.slice(s1 + '</script>'.length);
 
-/* ② 顶栏：房间信息 + 导出 */
+/* ② 标题：这是**联网版**，不是单机版 —— 标签页标题与顶栏都要改
+ *  ★ 必须改在这里而不是手改 index.html：index.html 是**生成物**，
+ *    下次跑这个脚本就会被覆盖回去（我刚踩过：改完了、一 build 又变回"单机可摸版"）。 */
+html = html.replace(/骰娘 M2 · 单机可摸版/g, 'TRPG · 骰娘在线');
+
+/* ② 顶栏：房间信息 + 导出 + 导入 */
 html = html.replace('<span class="pill" id="p-cnt">0 条</span>',
   '<span class="pill" id="p-room">房间 —</span>\n      <span class="pill" id="p-cnt">0 条</span>');
 html = html.replace('<button class="quick" data-cmd=".set baredice on">.set baredice on</button>',
-  '<button class="quick" data-cmd=".set baredice on">.set baredice on</button>\n      <button class="quick" id="btn-export">导出战报</button>');
+  '<button class="quick" data-cmd=".set baredice on">.set baredice on</button>\n      <button class="quick" id="btn-export">导出战报</button>' +
+  /* ★ 导入按钮：战报导出去就得能导回来，否则"NDJSON 可原样回灌"是句空话 */
+  '\n      <button class="quick" id="btn-import">导入战报</button>' +
+  /* ★ 隐藏的 file 控件：<button> 无法直接触发选文件，必须借一个真实的 input[type=file] */
+  '\n      <input type="file" id="file-import" accept=".ndjson,.json,.txt" hidden>');
 
 /* ③ 进房页：加在 #app 之前（默认显示，进房成功后隐藏） */
 const GATE = `

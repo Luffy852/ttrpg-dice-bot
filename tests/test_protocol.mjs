@@ -20,6 +20,8 @@ import {fileURLToPath} from 'node:url';
 import * as Engine from '../packages/engine/src/index.js';
 import {createRoomCore} from '../apps/worker/src/core.js';
 import {createMemoryStorage} from './memory_storage.mjs';
+import {toNdjson, fromNdjson, toBattle, exportAs, FORMAT} from '../apps/worker/src/export.js';
+import {ymdhm} from '../packages/engine/src/util.js';
 import {checkIn, IN, ERR} from '../packages/protocol/src/frames.js';
 import {checkPayload, KIND, checkText, LIMITS} from '../packages/protocol/src/payload.js';
 import {dedupe, gapOf, msgId, backoff, tokenBucket, cursorOf} from '../packages/protocol/src/cursor.js';
@@ -508,6 +510,136 @@ console.log('== 20. ★ 昵称：改名要同步顶栏、空白登录不能冲�
   // ③ 服务端：没填昵称就不改库里的 nick
   const roomSrc = fs.readFileSync(path.join(ROOT, 'apps', 'worker', 'src', 'room.js'), 'utf8');
   ok('★ 只有真的填了昵称才写库', /if\(wantNick\) this\.sql\.exec\('UPDATE members SET nick/.test(roomSrc));
+}
+
+console.log('== 21. ★ 战报导出：时区一致 + 结构化说明要有内容（真机反馈 · 第 6/7 条）==');
+{
+  /* ① 导出时间戳必须与消息时间同一个时区（UTC+8） */
+  const TS = Date.UTC(2026, 9, 31, 9, 0, 0);      // 2026-10-31 09:00 UTC = 17:00 UTC+8
+  eq('★ ymdhm 按 UTC+8', ymdhm(TS), '2026-10-31 17:00');
+  ok('★ 不再用 toISOString（那是 UTC，会差 8 小时）',
+    !/toISOString/.test(fs.readFileSync(path.join(ROOT, 'apps', 'worker', 'src', 'room.js'), 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')), 'room.js 里不该再有');
+  const battle = toBattle([{seq:1, id:'x1', ts:TS, kind:'chat', from:'老王', actor:'老王', payload:{text:'你好'}}],
+    {code:'593353', rule:'dnd5e', exportedAt:ymdhm(TS)});
+  ok('★ 战报里的导出时间 = 消息时间的时区', /导出：2026-10-31 17:00/.test(battle), battle.split('\n')[2]);
+  ok('★ 同一份战报里消息也是 17:00（不是 09:00）', /`17:00`/.test(battle), battle.split('\n').find(l => /17:00|09:00/.test(l)));
+
+  /* ② 结构化说明（.st / .status / 规则切换）不能只剩一句占位 */
+  const msgs = [
+    {seq:1, id:'m1', ts:TS, kind:'chat', from:'老王', actor:'老王', payload:{text:'.st'}},
+    {seq:2, id:'m2', ts:TS, kind:'html', from:'骰娘', actor:'老王', payload:{defs:{
+      title:'老王的角色卡 · D&D',
+      sections:[{h:'属性', rows:[{k:'力量', v:'16'}, {k:'敏捷', v:'14'}]}],
+      foot:['等级用于推导熟练加值']
+    }}},
+  ];
+  const md = toBattle(msgs, {code:'593353', rule:'dnd5e', exportedAt:ymdhm(TS)});
+  ok('★ 战报里的角色卡能看到属性（不是一句占位）', /力量/.test(md) && /16/.test(md), md.slice(-200));
+  ok('★ 战报里不再出现"导出用 NDJSON 保留完整内容"的占位句',
+    !/导出用 NDJSON 保留完整内容/.test(md), md.slice(-160));
+  /* ★ 说明里的 HTML 标签要剥掉：战报是纯文本，留着 <b> 会直接印出来 */
+  const md2 = toBattle([{seq:1, id:'h1', ts:TS, kind:'html', from:'骰娘', actor:'老王', payload:{defs:{
+    title:'⚠️ 规则设定已变更', sections:[{rows:[{k:'提示', v:'用 <b>.set rule generic</b> 回退'}]}]}}}],
+    {code:'1', rule:'generic', exportedAt:'x'});
+  ok('★ 战报里不残留 HTML 标签', !/<b>/.test(md2), md2.slice(-120));
+  ok('★ 但文字内容还在', /\.set rule generic/.test(md2), md2.slice(-120));
+
+  /* ③ 导出文件：md 与 ndjson 都要给，ndjson 文件名带时间（多次导出不会同名） */
+  const e1 = exportAs(msgs, {code:'593353', rule:'dnd5e', exportedAt:'2026-10-31 17:00'}, FORMAT.MD);
+  const e2 = exportAs(msgs, {code:'593353', rule:'dnd5e', exportedAt:'2026-10-31 17:00'}, FORMAT.NDJSON);
+  ok('★ md 文件名', /战报-593353\.md$/.test(e1.name), e1.name);
+  ok('★ ndjson 文件名带导出时间', /房间-593353-202610311700\.ndjson/.test(e2.name), e2.name);
+}
+
+console.log('== 22. ★ 战报导入：接在当前房间后面 + 按 msg_id 去重（真机反馈 · 第 8 条）==');
+{
+  const mk = (i, id) => ({seq:i, id, ts:1772000000000 + i, kind:'chat', from:'老王', actor:'老王',
+    anon_id:'a1', req_id:null, rule_at:'generic', payload:{text:'第' + i + '条'}});
+  const nd = toNdjson([mk(1, 'id-a'), mk(2, 'id-b')]);
+  const p1 = fromNdjson(nd);
+  eq('★ NDJSON 往返条数一致', p1.msgs.length, 2);
+  eq('★ 往返后内容一致', p1.msgs[1].payload.text, '第2条');
+
+  // 坏行不该让整份战报废掉
+  const p2 = fromNdjson(nd + '{"bad":1}\n');
+  eq('★ 坏行被收集而不是整批失败', p2.msgs.length, 2);
+  eq('★ 坏行有记录', p2.errs.length, 1);
+  eq('★ 空行不算坏行', fromNdjson('\n\n').errs.length, 0);
+
+  /* ★ 导入语义（room.js 的 /import 分支，这里验它依赖的两个存储方法契约）：
+   *   ① 接在 maxSeq 之后 ② 按 msg_id 去重 */
+  const st = createMemoryStorage('IMP001');
+  let t = 1772000000000;
+  const core = createRoomCore(st, {now: () => (t += 1000)});
+  await core.apply({reqId:'r1', text:'房内已有的一条', anonId:'a1', nick:'老王'});
+  /* ★ 先取**数量快照**再插入：st._all() 返回的是同一个数组引用，
+   *   插入后 cur.length 也跟着变 —— 拿它当"原有条数"就会算出错误的期望值。 */
+  const before = st._all().length;
+  const cur = st._all();
+  const maxSeq = await st.maxSeq();
+  eq('★ 房间现有最大 seq', maxSeq, cur[cur.length - 1].seq);
+
+  const incoming = fromNdjson(toNdjson([mk(1, 'id-a'), mk(2, 'id-b')])).msgs;
+  const dup = await st.hasIds(incoming.map(m => m.id));
+  eq('★ 新战报里没有与现有消息重名的（不该被跳过）', dup.size, 0);
+  let base = maxSeq;
+  const list = incoming.filter(m => !dup.has(m.id)).map(m => Object.assign({}, m, {seq:++base}));
+  await st.insertMsgs(list);
+  eq('★ 导入后条数 = 原有 + 新增', st._all().length, before + 2);
+  ok('★ 导入的消息 seq 接在原有之后（不重排现有消息）',
+    list[0].seq > maxSeq, list[0].seq + ' > ' + maxSeq);
+
+  // 第二次导入同一份：全部命中已存在 → 跳过，不翻倍
+  const dup2 = await st.hasIds(incoming.map(m => m.id));
+  eq('★ 重复导入会全部命中（幂等）', dup2.size, 2);
+  eq('★ 幂等：条数不变', st._all().length, before + 2);
+
+  /* ★ 网关必须把 token 一起转发：只转 body 的话 DO 侧拿不到 token → bad_token。
+   *   端到端真跑才发现（单测直接调 DO，绕开了网关这一层）。 */
+  const idxSrc = fs.readFileSync(path.join(ROOT, 'apps', 'worker', 'src', 'index.js'), 'utf8');
+  ok('★ 网关转发 /import 时带上查询串（token 在里面）',
+    /doFetch\(stub, '\/import\?' \+ url\.searchParams\.toString\(\)/.test(idxSrc), 'index.js');
+  ok('★ 网关的房间路由认得 /import', /\/import/.test(idxSrc) && /\/export/.test(idxSrc), 'index.js');
+  ok('★ /import 只接受 POST（没有 body 的 GET 不该白跑一趟）',
+    /sub === '\/import' && request\.method === 'POST'/.test(idxSrc));
+  const roomSrc = fs.readFileSync(path.join(ROOT, 'apps', 'worker', 'src', 'room.js'), 'utf8');
+  ok('★ DO 侧 /import 要先验 token（导入会写库，不能谁都能来）',
+    /url\.pathname === '\/import'[\s\S]{0,200}verifyToken/.test(roomSrc));
+  ok('★ 导入后会广播（不然别人看不到，只在自己刷新后才出现）',
+    /if\(list\.length\) this\.broadcast/.test(roomSrc));
+}
+
+console.log('== 23. ★ 页面标题 + D&D 角色卡增加 AC（真机反馈 · 第 3/5 条）==');
+{
+  const html = fs.readFileSync(path.join(ROOT, 'apps', 'web', 'index.html'), 'utf8');
+  /* ① 标题：这是联网版，不是单机版 —— 标签页标题与顶栏都要改 */
+  ok('★ 浏览器标签标题已改', /<title>TRPG · 骰娘在线<\/title>/.test(html), 'index.html');
+  ok('★ 顶栏标题已改', /TRPG · 骰娘在线/.test(html));
+  ok('★ 不再出现"单机可摸版"', !/单机可摸/.test(html), 'index.html');
+
+  /* ② D&D 卡的静态数据 AC / HP：与 COC 的 HP·SAN 同形态 */
+  const {parseCardSet, renderCardHtml} = await import('../packages/engine/src/card.js');
+  const r = parseCardSet('力量 16 敏捷 14 体质 15 智力 10 感知 12 魅力 8 等级 3 ac 16 hp 24');
+  eq('★ 卡能设 AC', r.data.ac, 16);
+  eq('★ 卡能设 HP', r.data.hp, 24);
+  eq('★ 无解析错误', r.errs.length, 0);
+  /* ★ AC 的取值范围与属性不同：沿用属性的 1–30 会把高等级 HP 判非法 */
+  eq('★ HP 可以超过 30（不被属性范围误伤）', parseCardSet('hp 120').errs.length, 0);
+  ok('★ AC 超范围会报错', parseCardSet('ac 1000').errs.length > 0);
+  ok('★ AC 认中文别名', parseCardSet('护甲等级 17').data.ac === 17, String(parseCardSet('护甲等级 17').data));
+  const cardHtml = renderCardHtml({family:'dnd', data:{str:16, dex:14, ac:16, hp:24, lv:3}});
+  ok('★ 卡片渲染出 AC', /护甲等级/.test(cardHtml) && />16</.test(cardHtml), cardHtml.slice(-120));
+  ok('★ 卡片渲染出 HP', /生命值/.test(cardHtml) && />24</.test(cardHtml));
+  /* ★ AC 不该有调整值：它没有 +N 的语义，塞进六格栅格会显示成"16 +0" */
+  const packDnd = (await import('../packages/engine/src/pack_dnd.js')).DND_PACK
+    || (await import('../packages/engine/src/packs.js')).rulePack('dnd5e');
+  ok('★ 卡模板里说明了 AC 需自己填', /AC/.test(JSON.stringify(packDnd.cardTemplate())), 'cardTemplate');
+  // AC / HP 不参与检定：不能出现在可检定名字里
+  /* ★ 精确匹配：用 /ac/i 会被 "acrobatics（特技）" 命中 —— 那是真技能，不能误判 */
+  const skillKeys = new Set((await import('../packages/engine/src/dnd.js')).DND_SKILLS.map(s => s.en));
+  ok('★ AC 不参与检定（不是 .rc 的目标）', !skillKeys.has('ac') && !skillKeys.has('hp'),
+    [...skillKeys].slice(0, 3).join(','));
 }
 
 console.log('---------------------------');

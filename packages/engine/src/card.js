@@ -2,17 +2,21 @@
  * 从 M2 的 ENGINE 区整体搬来，逻辑一行未改（由 676 项断言锁定）。
  */
 import { lookupAlias, registerAliases } from './alias.js';
-import { ABIL_ZH, DND_ABILITIES, abilityMod } from './dnd.js';
+import { ABIL_ZH, DND_ABILITIES, DND_STATIC, DND_STATIC_SET, abilityMod } from './dnd.js';
 import { CARD_DOMAIN } from './domains.js';
 import { RULE_META, ruleFamily } from './rules.js';
 import { esc, fmtMod } from './util.js';
 
 const CARD_KEYS = ['str','dex','con','int','wis','cha','lv','level'];
+const DND_STATIC_ZH = Object.fromEntries(DND_STATIC.map(x => [x.key, x.zh]));
 // 卡字段同样走别名层：属性直接用 check 域的中文，等级单独一组。
 // 域名带族（CARD_DOMAIN.dnd）—— M2 后四套规则各有一张卡字段表，不能共用一个域。
 registerAliases(CARD_DOMAIN.dnd,
   DND_ABILITIES.map(a => ({key:a.key, display:a.zh, aliases:a.aliases}))
   .concat([{key:'lv', display:'等级', aliases:['lv','level','等级','级别','lvl','等阶']}])
+  /* ★ AC / HP 也走同一个卡域：玩家写 `.st set 力量 16 ... ac 16` 时，
+   *   它们与六属性在**同一个位置**输入，没有理由只有六属性认别名（真机反馈 · 第 5 条）。 */
+  .concat(DND_STATIC.map(x => ({key:x.key, display:x.zh, aliases:x.aliases})))
 );
 function normalizeCardKey(k){
   const e = lookupAlias(CARD_DOMAIN.dnd, k);
@@ -29,6 +33,10 @@ function parseCardSet(rest){
     const v = parseInt(val, 10);
     if(key === 'lv'){
       if(v < 1 || v > 20){ errs.push('等级需在 1–20'); continue; }
+    } else if(DND_STATIC_SET.has(key)){
+      /* ★ AC / HP 的取值范围与属性不同：AC 通常 10–25、HP 可以很大。
+       *   沿用属性的 1–30 会把高等级角色的 HP 判为非法（30 级法师 HP 上百很正常）。 */
+      if(v < 0 || v > 999){ errs.push(DND_STATIC_ZH[key] + '需在 0–999'); continue; }
     } else if(v < 1 || v > 30){ errs.push(ABIL_ZH[key] + '需在 1–30'); continue; }
     data[key] = v;
   }
@@ -107,7 +115,13 @@ function renderCardHtml(card){
       '<span class="cv">' + (typeof v === 'number' ? v : '—') + '</span> ' +
       '<span class="cm">' + fmtMod(cardMod(card, k)) + '</span></div>';
   }).join('');
-  return '<div class="card">' + cells + '</div>';
+  /* ★ 静态数据（AC / HP）单独一行 —— 与 COC 的 HP · SAN 同一形态（真机反馈 · 第 5 条）
+   * 【为什么不塞进六格栅格】它们没有调整值（AC 16 不对应 +3），
+   *   塞进去会出现"数字后面跟个 +0"，看着像 bug。 */
+  const stat = DND_STATIC.filter(x => typeof card.data[x.key] === 'number')
+    .map(x => esc(x.zh) + ' <b>' + card.data[x.key] + '</b>').join('　·　');
+  const memo = stat ? '<div class="stline" style="margin-top:6px">' + stat + '</div>' : '';
+  return '<div class="card">' + cells + '</div>' + memo;
 }
 
 export { renderCardHtml,  CARD_KEYS, normalizeCardKey, parseCardSet, cardMod, cardRuleName, cardMismatchNote };

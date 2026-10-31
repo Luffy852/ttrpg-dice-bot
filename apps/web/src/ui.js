@@ -18,7 +18,7 @@ import {toRenderable} from '../vendor/engine/render-md.js';
  * 【为什么直接 import 而不是照抄】抄一份迟早再次漂移（原则 4）。 */
 const hhmm = Engine.hhmm;
 
-export function createUI({code, onSubmit, onExport}){
+export function createUI({code, onSubmit, onExport, onImport}){
   const $ = id => document.getElementById(id);
   const $stream = $('stream'), $input = $('input'), $send = $('send');
   const seen = new Set();
@@ -204,6 +204,22 @@ export function createUI({code, onSubmit, onExport}){
   });
   const $exp = $('btn-export');
   if($exp) $exp.addEventListener('click', () => onExport && onExport());
+  /* ★ 导入：按钮 → 触发隐藏的 file 控件 → 选完把**文本**交给上层（不是 File 对象）。
+   *   UI 层不认识后端协议，它只负责"把用户选的文件内容拿到手"。 */
+  const $imp = $('btn-import'), $file = $('file-import');
+  if($imp && $file){
+    $imp.addEventListener('click', () => $file.click());
+    $file.addEventListener('change', async () => {
+      const f = $file.files && $file.files[0];
+      if(!f) return;
+      try{
+        const text = await f.text();
+        onImport && onImport(text, f.name);
+      }catch(e){ note('读文件失败：' + (e && e.message || e)); }
+      /* ★ 清空 value：否则连续导入同一个文件不会再触发 change（第二次像没反应） */
+      $file.value = '';
+    });
+  }
 
   /* ---------- 键盘适配（M2 真机验证三件套，原样搬） ---------- */
   const vv = window.visualViewport;
