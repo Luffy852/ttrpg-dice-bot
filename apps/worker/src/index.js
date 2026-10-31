@@ -133,6 +133,8 @@ export default {
          *   前端辛苦生成并持久化的 cid 在网关这一层被丢掉 —— DO 侧逻辑全对也没用。
          *   这类"转发漏字段"的 bug 单测很难发现（room.js 单独跑是好的），只能靠端到端。 */
         const r = await doFetch(stub, '/join', {method:'POST', body:JSON.stringify({nick:b.nick, pin:b.pin, cid:b.cid})});
+        /* ★ 原样透传：join 的 nick 是服务端算出的权威昵称（找回身份时可能与客户端填的不同），
+         *   网关丢字段 = 前端又拿默认"玩家"当自己 —— 上次 cid 就是这么丢的。 */
         return JSON_(await r.json(), r.status);
       }
       if(sub === '/meta')    return JSON_(await (await doFetch(stub, '/meta')).json());

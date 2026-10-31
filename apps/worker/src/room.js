@@ -242,12 +242,23 @@ export class RoomDO extends DurableObject {
       /* ★ 空串一律走**绑定参数**：SQLite 里 "" 是"双引号字符串"，
        *   某些构建（DQS 关闭）会把它当**标识符**解析 → "no such column" → 整条 UPDATE 抛错。
        *   写 '""' 字面量也不行：单引号会把 JS 字符串截断（这个我踩过，打包时才暴露）。 */
+      /* ★ 昵称以**库里的为准**，并且只在客户端真的填了昵称时才改（真机反馈 · D 组）
+       * 【症状】关页重进时不填昵称 → 前端用默认"玩家"进房，但服务端按 cid 认出你是"战斗菇"。
+       *   结果：自己发的消息 from="战斗菇"、而本地 st.me="玩家" → 自己的气泡显示在**左边**，
+       *   .status 却又说你是"战斗菇" —— 一处一个说法，用户完全懵。
+       * 【为什么不能让前端的 nick 直接覆盖】前端在没填时会传默认"玩家"，
+       *   那等于每次关页重进都把昵称改回"玩家"，房间里的人全变成"玩家"。
+       * 【改名怎么办】没有 .nick 指令，改名就靠进房时填 —— 填了才改，不填不动。 */
+      const wantNick = (typeof body.nick === 'string' && body.nick.trim()) ? String(body.nick).trim().slice(0, 16) : null;
       try{
         if(cid) this.sql.exec('UPDATE members SET cid = ?, last_seen = ? WHERE anon_id = ? AND (cid IS NULL OR cid = ?)', cid, now, anonId, '');
-        this.sql.exec('UPDATE members SET last_seen = ? WHERE anon_id = ?', now, anonId);
-      }catch(e){ /* 同上：记账失败不阻断进房 */ }
+        if(wantNick) this.sql.exec('UPDATE members SET nick = ? WHERE anon_id = ?', wantNick, anonId);
+      }catch(e){ /* 记账失败不阻断进房 */ }
+      const row = this.sql.exec('SELECT nick FROM members WHERE anon_id = ?', anonId).toArray()[0] || {};
+      const myNick = row.nick || wantNick || '玩家';
       const token = await signToken({code:room.code, anon_id:anonId, exp:Math.floor(now / 1000) + TOKEN_TTL}, this.env.PIN_SECRET);
-      return Response.json({token, anon_id:anonId, rule:room.rule});
+      /* ★ nick 必须回传：前端拿它当"我是谁"，否则又会与服务端各说一套 */
+      return Response.json({token, anon_id:anonId, rule:room.rule, nick:myNick});
     }
 
     if(url.pathname === '/meta'){
@@ -329,7 +340,9 @@ export class RoomDO extends DurableObject {
       const room = await this.storage().getRoom();
       const me = this.sql.exec('SELECT nick FROM members WHERE anon_id = ?', anonId).toArray()[0] || {};
       const mem = this.members();
-      this.send(ws, {t:OUT.WELCOME, you:{anon_id:anonId, nick:f.nick || me.nick || '玩家'},
+      /* ★ 库里的 nick 优先于客户端自报的：客户端自报可能是默认"玩家"，
+       *   而库里才是这个身份真正的昵称（与 .status / 成员列表同源）。 */
+      this.send(ws, {t:OUT.WELCOME, you:{anon_id:anonId, nick:me.nick || f.nick || '玩家'},
         room:{rule:room.rule, baredice:!!room.baredice, seq:room.seq, msg_count:await this.storage().countMsgs()},
         server_time:Date.now(), members:mem,
         online:this.onlineCount(), total:mem.length});

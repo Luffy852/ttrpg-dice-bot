@@ -24,7 +24,11 @@ const store = {
  *   解决不了"关页重进"。cid 只在本机、不含任何个人信息，换设备仍然是新身份。
  * 【与 PIN 的关系】PIN 校验在服务端先过，不知道 PIN 的人拿不到 token，
  *   也就无从用 cid 恢复身份 —— 防误入口径没有变松。 */
-const CID_KEY = 'db:cid';
+/* ★ 键名叫 db:me 不叫 db:cid：net.js 里还有一个 clientId（req_id 的前缀），
+ *   那个**必须**每次刷新都变（否则重连补历史时 req_id 会撞车），
+ *   两者概念相反却都叫 cid —— 迟早有人把这一个也做成"每次刷新重新生成"。 */
+const CID_KEY = 'db:me';
+const NICK_KEY = 'db:nick';      // ★ 记住上次用过的昵称，关页重进不用重填（否则会以"玩家"身份进房）
 function myCid(){
   try{
     let c = localStorage.getItem(CID_KEY);
@@ -130,13 +134,22 @@ function enter(r){
 }
 
 async function doJoin(code, nick, pin){
-  const j = await api('/api/room/' + code + '/join', {nick, pin:pin || undefined, cid:myCid()});
-  store.set('db:room:' + code, JSON.stringify({token:j.token, nick}));
-  enter({code, token:j.token, nick});
+  /* ★ nick 为空就传 null：服务端据此判断"这次没填昵称" ——
+   *   否则前端的默认"玩家"会把你**真正的昵称覆盖掉**（关页重进一次就变回"玩家"）。 */
+  const j = await api('/api/room/' + code + '/join', {nick:nick || null, pin:pin || undefined, cid:myCid()});
+  /* ★ 用服务端返回的 nick：找回老身份时它可能与我在表单里填的不同，
+   *   而它才是房间里公认的那个我（与 .status / 成员列表同源）。 */
+  const myNick = j.nick || nick || '玩家';
+  try{ localStorage.setItem(NICK_KEY, myNick); }catch(e){}
+  store.set('db:room:' + code, JSON.stringify({token:j.token, nick:myNick}));
+  enter({code, token:j.token, nick:myNick});
 }
 
 /* ---------- 进房页交互 ---------- */
 function bindGate(){
+  /* ★ 预填上次用过的昵称：不预填的话用户偷懒直接输房间号就进了，
+   *   于是本地是"玩家"、服务端记得你是"战斗菇" —— 自己的消息会显示在左边。 */
+  try{ if(!$('g-nick').value && localStorage.getItem(NICK_KEY)) $('g-nick').value = localStorage.getItem(NICK_KEY); }catch(e){}
   document.querySelectorAll('.tab').forEach(t => {
     t.addEventListener('click', () => {
       document.querySelectorAll('.tab').forEach(x => x.classList.remove('on'));

@@ -255,7 +255,11 @@ function type(ui, net, text){
   const ra = na.send('.r 1d6'), rb = nb.send('.r 1d6');
   ok('★ 刷新页面后 cid 重新生成（req_id 不与上次会话撞车）',
     pre(ra) !== pre(rb), ra + ' vs ' + rb);
-  ok('★ cid 不再写进 localStorage（持久化 = 刷新后撞车）',
+  /* ★ 注意有两个同名概念，别搞混：
+   *   net.js 的 clientId = req_id 前缀，**必须**每次刷新都变（否则补历史时撞车）；
+   *   main.js 的身份键 = 长期不变的"我是谁"（存在 localStorage，键名 db:me）。
+   *   这里断言的是前者；后者刻意叫 db:me 就是为了不让人把它们当成同一个东西。 */
+  ok('★ req_id 的 clientId 不持久化（持久化 = 刷新后撞车）',
     w.localStorage.getItem('db:cid') === null, 'db:cid=' + w.localStorage.getItem('db:cid'));
 
   /* ★ 撞车时的兜底：用历史上已存在的 req_id 再发一次 → 服务端回 dup（不带 batch）
@@ -272,6 +276,96 @@ function type(ui, net, text){
   const dupBody = mainSrc.slice(mainSrc.indexOf('dup(reqId'), mainSrc.indexOf('reject(reqId'));
   ok('★ 生产 main.js 的 on.dup 也会处理占位气泡（不是空实现）',
     /failPending/.test(dupBody), dupBody.slice(0, 80));
+
+  /* ★ 上翻加载：滚到顶要真的发出 history 请求，回来的消息要插到**顶部**（真机反馈 · C/D 组）
+   * 【为什么必须在这里验】协议层只测得到服务端分页对不对；
+   *   "滚到顶有没有触发 / 插在了顶部还是底部"只有真 DOM 才测得出来。
+   *   真机反馈说"拉到头没有反应" —— 这类问题静态断言永远抓不到。 */
+  {
+    const {createUI: mkUI} = await import('../apps/web/src/ui.js?paging=1');
+    const ui2 = mkUI({code:'123456', onSubmit(){}, onExport(){}});
+    let asked = null;
+    ui2.onLoadOlder(seq => { asked = seq; });
+
+    // jsdom 不做布局，scrollHeight 恒 0；scrollTop 是可写属性，手动置 0 即可模拟"滚到顶"
+    const stream = d.getElementById('stream');
+    const mkMsg = i => ({seq:i, id:'page-' + i, ts:Date.now(), kind:'chat',
+      from:'老王', actor:'老王', anon_id:'a1', req_id:null, rule_at:'generic', payload:{text:'第' + i + '条'}});
+    const older = [mkMsg(1), mkMsg(2), mkMsg(3)];
+
+    // ① 还没拿到首屏分页信息时，滚动不该发请求（不知道锚点，也不确定有没有更早的）
+    stream.scrollTop = 0;
+    stream.dispatchEvent(new w.Event('scroll'));
+    await sleep(5);
+    ok('★ 没有分页信息时，滚到顶不发请求', asked === null, String(asked));
+
+    // ② 首屏：最近 N 条 + 有更早的 → 滚到顶应发出请求，锚点 = 首屏最小 seq
+    ui2.setPaging(50, true, 402);
+    stream.scrollTop = 0;
+    stream.dispatchEvent(new w.Event('scroll'));
+    await sleep(5);
+    ok('★ 滚到顶发出了上翻请求', asked !== null, String(asked));
+    ok('★ 锚点是首屏最小 seq（不是最新游标）', asked === 50, String(asked));
+    const cntBefore = d.querySelectorAll('#stream .msg').length;
+
+    // ③ 回来的一页必须插在**顶部**：末条之后应是首屏原来的第一条
+    ui2.prepend(older);
+    ui2.doneLoadingOlder(false);
+    const kids = [...d.querySelectorAll('#stream .msg')];
+    ok('★ 上翻的消息插在顶部', /第1条/.test(kids[0].textContent), kids[0].textContent.slice(0, 30));
+    ok('★ 原有消息仍在（没被清空）', kids.length >= cntBefore + 3, 'before=' + cntBefore + ' after=' + kids.length);
+    // ④ 翻到底后不再发请求（has_more=false）
+    asked = null;
+    stream.scrollTop = 0;
+    stream.dispatchEvent(new w.Event('scroll'));
+    await sleep(5);
+    ok('★ 没有更早的之后不再发请求', asked === null, String(asked));
+    // ⑤ 不在顶部时不发请求
+    ui2.setPaging(20, true, 402);
+    asked = null;
+    stream.scrollTop = 999;
+    stream.dispatchEvent(new w.Event('scroll'));
+    await sleep(5);
+    ok('★ 没滚到顶时不发请求', asked === null, String(asked));
+
+    /* ⑥ 顶部必须有一个**能点的**入口：滚动触发在部分浏览器 / 手势下不灵，
+     *   那时若没有按钮，用户就完全拿不到更早的历史，只会以为消息丢了。 */
+    ui2.setPaging(20, true, 402);
+    const btn = d.querySelector('#stream .loadbtn');
+    ok('★ 还有更早的时，顶部出现可点入口', !!btn, btn ? btn.textContent : '(没有)');
+    ok('★ 入口在消息流最顶部（不会被上翻插入的内容顶下去）',
+      !!btn && d.getElementById('stream').firstChild === btn);
+    asked = null;
+    stream.scrollTop = 999;                       // 故意"没滚到顶"
+    btn && btn.dispatchEvent(new w.Event('click'));
+    await sleep(5);
+    ok('★ 点入口能加载（不受滚动位置限制）', asked === 20, String(asked));
+    // ⑦ 加载标志不会永久卡住（服务端没回声时，超时后要解锁，否则从此再也翻不动）
+    ui2.setPaging(10, true, 402);
+    stream.scrollTop = 0;
+    stream.dispatchEvent(new w.Event('scroll'));   // → loading = true
+    await sleep(5);
+    asked = null;
+    stream.dispatchEvent(new w.Event('scroll'));
+    await sleep(5);
+    ok('★ 加载中不会重复发请求', asked === null, String(asked));
+  }
+
+  /* ★ 上翻插入的顺序：整批插入，历史必须正序（不能倒着来） */
+  {
+    const {createUI: mkUI} = await import('../apps/web/src/ui.js?order=1');
+    const ui3 = mkUI({code:'123456', onSubmit(){}, onExport(){}});
+    const stream = d.getElementById('stream');
+    const mk = i => ({seq:i, id:'ord-' + i, ts:Date.now(), kind:'chat', from:'老王', actor:'老王',
+      anon_id:'a1', req_id:null, rule_at:'generic', payload:{text:'#' + i}});
+    ui3.append(mk(9));
+    ui3.prepend([mk(1), mk(2), mk(3)]);
+    const txt = [...d.querySelectorAll('#stream .msg')].map(e => e.textContent);
+    const at = t => txt.findIndex(x => x.indexOf(t) >= 0);
+    ok('★ 上翻整批插入后仍是正序', at('#1') < at('#2') && at('#2') < at('#3'),
+      txt.map(x => x.replace(/\s+/g, '')).slice(0, 4).join(' | '));
+    ok('★ 上翻的内容在原有内容之前', at('#3') < at('#9'), at('#3') + ' vs ' + at('#9'));
+  }
 
   console.log(bad ? ('\n❌ 端到端冒烟：' + bad + ' 项不通过') : '\n✅ 端到端冒烟全通过');
   process.exit(bad ? 1 : 0);

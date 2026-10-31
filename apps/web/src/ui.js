@@ -88,13 +88,16 @@ export function createUI({code, onSubmit, onExport}){
    *   否则之后 ws 又广播同一条（幂等回放）会重复渲染。 */
   function prepend(msgs){
     const before = $stream.scrollHeight, top = $stream.scrollTop;
-    let n = 0;
+    /* ★ 必须**整批一次**插入：逐条 afterbegin 会把后一条顶到最前面，
+     *   一页 200 条的顺序会整个反过来（真机冒烟抓到的）—— 历史倒着看更让人懵。 */
+    let html = '', n = 0;
     msgs.forEach(m => {
       if(seen.has(m.id)) return;
-      seen.add(m.id); n++;
-      $stream.insertAdjacentHTML('afterbegin', htmlOf(m));
+      seen.add(m.id); n++; html += htmlOf(m);
     });
+    if(n) $stream.insertAdjacentHTML('afterbegin', html);
     if(n) $stream.scrollTop = top + ($stream.scrollHeight - before);   // ★ 位置保持
+    refreshLoadBtn();
     refreshTop();
     return n;
   }
@@ -112,34 +115,46 @@ export function createUI({code, onSubmit, onExport}){
     if(oldest != null) oldestSeq = (oldestSeq == null ? oldest : Math.min(oldestSeq, oldest));
     if(more != null) hasMoreOlder = !!more;
     if(total != null) st.msgTotal = total;
+    refreshLoadBtn();
     refreshTop();
   }
-  function maybeLoadOlder(){
+  function maybeLoadOlder(force){
     if(loading || !hasMoreOlder || oldestSeq == null || !loadOlder) return;
-    if($stream.scrollTop > LOAD_TOP) return;
+    /* ★ force = 点了顶部那个按钮：不能再卡 scrollTop —— 按钮本身就在顶部，
+     *   但容器可能还没滚到位，那时会被"不在顶部"拦掉 → 点了没反应
+     *   （与"拉到头没反应"是同一类：看不到任何反馈，只会以为功能不存在）。 */
+    if(!force && $stream.scrollTop > LOAD_TOP) return;
     loading = true;
-    showLoadingTop(true);
+    /* ★ 超时解锁：服务端没回声时 loading 会永远卡住，此后再滚到顶也没反应 ——
+     *   真机上这表现为"上翻只工作一次然后彻底失灵"，很难联想到是没解锁。 */
+    clearTimeout(loadTimer);
+    loadTimer = setTimeout(() => { if(loading) doneLoadingOlder(true); }, 8000);
     loadOlder(oldestSeq);
   }
+  let loadTimer = null;
   function doneLoadingOlder(more){
     loading = false;
+    clearTimeout(loadTimer);
     hasMoreOlder = !!more;
-    showLoadingTop(false);
+    refreshLoadBtn();
     refreshTop();
   }
-  /** 顶部的"正在加载更早…"提示条：插在消息最上方，加载完移除 */
-  let $loadingTop = null;
-  function showLoadingTop(on){
-    if(on){
-      if($loadingTop) return;
-      $loadingTop = document.createElement('div');
-      $loadingTop.className = 'notice loadmore';
-      $loadingTop.textContent = '正在加载更早的消息…';
-      $stream.insertBefore($loadingTop, $stream.firstChild);
-    }else if($loadingTop){
-      $loadingTop.remove(); $loadingTop = null;
+  /* ★ 顶部可见入口（不替代自动加载，是它的兜底）
+   *   滚到顶自动加载在某些浏览器 / 手势下不一定触发，而那时用户**没有任何办法**
+   *   拿到更早的历史 —— 只能以为消息丢了。给一个能点的入口，功能就永远有下限。 */
+  function refreshLoadBtn(){
+    if(!hasMoreOlder || oldestSeq == null){ if($loadBtn){ $loadBtn.remove(); $loadBtn = null; } return; }
+    if(!$loadBtn){
+      $loadBtn = document.createElement('div');
+      $loadBtn.className = 'notice loadbtn';
+      $loadBtn.addEventListener('click', () => maybeLoadOlder(true));
+      $stream.insertBefore($loadBtn, $stream.firstChild);
     }
+    /* ★ 按钮必须始终在最顶：上翻用 afterbegin 插入，会把按钮顶到历史消息下面去 */
+    if($stream.firstChild !== $loadBtn) $stream.insertBefore($loadBtn, $stream.firstChild);
+    $loadBtn.textContent = loading ? '正在加载更早的消息…' : ('↑ 加载更早的消息（还有 ' + Math.max(0, (st.msgTotal || 0) - seen.size) + ' 条）');
   }
+  let $loadBtn = null;
   $stream.addEventListener('scroll', () => { maybeLoadOlder(); }, {passive:true});
 
   function refreshTop(){

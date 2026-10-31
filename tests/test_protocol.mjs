@@ -425,6 +425,44 @@ console.log('== 16. ★ 上翻分页的接线（服务端 why 标记 + 前端三
   ok('★ 追加与插入共用同一个渲染函数', /function htmlOf/.test(uiSrc) && (uiSrc.match(/Engine\.renderMsg\(toRenderable\(m\)\)/g) || []).length <= 2);
 }
 
+console.log('== 17. ★ 昵称必须与"我是谁"同源（真机反馈 · D 组第 4 条）==');
+{
+  const roomSrc = fs.readFileSync(path.join(ROOT, 'apps', 'worker', 'src', 'room.js'), 'utf8');
+  const mainSrc = fs.readFileSync(path.join(ROOT, 'apps', 'web', 'src', 'main.js'), 'utf8');
+  const codeOnly = roomSrc.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  /* 【症状】关页重进不填昵称 → 前端拿默认"玩家"当自己，服务端按 cid 认出"战斗菇"。
+   *   于是自己发的消息 from="战斗菇"、本地 st.me="玩家" → 自己的气泡显示在**左边**，
+   *   但 .status 说你是"战斗菇" —— 一处一个说法。 */
+  ok('★ join 会返回权威昵称', /nick:myNick/.test(codeOnly), 'join 响应');
+  ok('★ 昵称以库里的为准（不是客户端自报的）', /nick:me\.nick \|\| f\.nick/.test(codeOnly), 'WELCOME 帧');
+  /* ★ 关键：没填昵称时不能把库里的昵称改成"玩家" —— 否则关页重进一次就毁掉一次 */
+  ok('★ 只有真的填了昵称才改库里的 nick', /wantNick[\s\S]{0,120}UPDATE members SET nick/.test(codeOnly));
+  ok('★ 没填昵称时前端传 null（不是默认"玩家"）', /nick:nick \|\| null/.test(mainSrc));
+  ok('★ 前端用服务端返回的昵称', /const myNick = j\.nick \|\| nick/.test(mainSrc));
+  /* ★ 表单预填：不预填的话用户偷懒直接输房间号就进，又变回"玩家" */
+  ok('★ 进房表单预填上次昵称', /localStorage\.getItem\(NICK_KEY\)/.test(mainSrc));
+  ok('★ 昵称键与 req_id 的 clientId 不重名（两者生命周期相反）',
+    /CID_KEY = 'db:me'/.test(mainSrc), 'db:me vs db:cid');
+  // 网关转发不能丢 nick（上次 cid 就是这么丢的）
+  const idxSrc = fs.readFileSync(path.join(ROOT, 'apps', 'worker', 'src', 'index.js'), 'utf8');
+  ok('★ 网关转发 /join 时带上了 nick', /nick:b\.nick/.test(idxSrc));
+}
+
+console.log('== 18. ★ 上翻的健壮性：可见入口 + 不会永久卡住（真机反馈 · D 组第 2 条）==');
+{
+  const uiSrc = fs.readFileSync(path.join(ROOT, 'apps', 'web', 'src', 'ui.js'), 'utf8');
+  /* 【症状】真机上"拉到头没有反应"，而服务端分页本身是对的 ——
+   *   纯靠滚动触发 = 触发不了就完全没有退路，用户只能以为消息丢了。 */
+  ok('★ 顶部有可点入口（滚动之外的退路）', /loadbtn/.test(uiSrc) && /maybeLoadOlder\(true\)/.test(uiSrc));
+  ok('★ 入口点击不受滚动位置限制', /if\(!force \&& \$stream\.scrollTop > LOAD_TOP\)/.test(uiSrc));
+  ok('★ 入口始终在最顶部（不会被上翻插入的内容顶下去）', /firstChild !== \$loadBtn/.test(uiSrc));
+  /* ★ loading 卡死是最阴的一类：表现为"上翻只灵一次，之后彻底没反应" */
+  ok('★ 有超时解锁，loading 不会永久卡住', /setTimeout\(\(\) => \{ if\(loading\) doneLoadingOlder/.test(uiSrc));
+  ok('★ 加载中不会重复发请求', /if\(loading/.test(uiSrc));
+  // 顺序：整批插入（逐条 afterbegin 会把一页历史完全倒过来）
+  ok('★ 上翻整批插入（不是逐条 afterbegin）', /html \+= htmlOf\(m\)/.test(uiSrc) && /insertAdjacentHTML\('afterbegin', html\)/.test(uiSrc));
+}
+
 console.log('---------------------------');
 console.log('协议层：通过 ' + pass + ' 项，失败 ' + fail + ' 项');
 if(fail) console.log('\n提示：失败项先分清是「协议逻辑错了」还是「测试替身与 DO 行为不一致」。');
