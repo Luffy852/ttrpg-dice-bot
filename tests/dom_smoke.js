@@ -389,6 +389,46 @@ function type(ui, net, text){
     ok('★ 真机路径下滚到顶会真的去取更早的一页', askedSeq === 300, String(askedSeq));
   }
 
+  /* ★★ 整房重载：重排后如果不先清空，服务端重发的一整屏会被判成重播而全部丢弃 ——
+   *   表现是"导入完什么都没变"，比报错还难查。 */
+  {
+    const stream = d.getElementById('stream');
+    /* ★ 先渲染一批，记住它们的 id —— 重载测试必须用**同一批 id**，
+     *   用新 id 的话就算 seen 没清空也会渲染出来，等于没测到（我第一版就写错了）。 */
+    const first = [];
+    for(let i = 1; i <= 3; i++) first.push({seq:900 + i, id:'rl-' + i, ts:Date.now(), kind:'chat',
+      from:'老王', actor:'老王', anon_id:'a1', req_id:null, rule_at:'generic', payload:{text:'重排后' + i}});
+    w.__route__({t:OUT.BATCH, why:'first', msgs:first, cursor:903, has_more:false, oldest:901, total:3});
+    await sleep(10);
+    ok('★ 重载前页面上有消息', d.querySelectorAll('#stream .msg').length > 0,
+      String(d.querySelectorAll('#stream .msg').length));
+    ui.reset();
+    ok('★ reset 后页面清空', d.querySelectorAll('#stream .msg').length === 0, String(d.querySelectorAll('#stream .msg').length));
+    /* ★ 关键：重排后服务端会**重发同一批 id**，若 seen 没清空会被判成重播而整屏丢弃 */
+    w.__route__({t:OUT.BATCH, why:'first', msgs:first, cursor:903, has_more:false, oldest:901, total:3});
+    await sleep(10);
+    ok('★ 同一批 id 重发后能重新渲染（seen 确实被清了）',
+      d.querySelectorAll('#stream .msg').length === 3, String(d.querySelectorAll('#stream .msg').length));
+    ok('★ 内容与重排后一致', /重排后1/.test(d.querySelector('#stream .msg').textContent));
+    // 重置后分页状态也要归位，不然会拿着旧锚点去翻
+    ok('★ reset 后分页状态归位', !d.querySelector('#stream .loadbtn'));
+  }
+
+  /* ★ 跨房间来源标记：导入进来的消息 id 前缀是别的房间号 */
+  {
+    ui.reset();
+    w.__route__({t:OUT.BATCH, why:'first', msgs:[
+      {seq:1, id:'593353:1', ts:Date.now(), kind:'chat', from:'老王', actor:'老王',
+       anon_id:'a1', req_id:null, rule_at:'generic', payload:{text:'外来的'}},
+      {seq:2, id:'123456:2', ts:Date.now(), kind:'chat', from:'老王', actor:'老王',
+       anon_id:'a1', req_id:null, rule_at:'generic', payload:{text:'本房的'}}
+    ], cursor:2, has_more:false, oldest:1, total:2});
+    await sleep(10);
+    const tags = [...d.querySelectorAll('#stream .srctag')].map(e => e.textContent);
+    ok('★ 只给外来的消息标来源', tags.length === 1, 'tags=' + tags.join(','));
+    ok('★ 标出来源房间号', /593353/.test(tags[0] || ''), tags.join(','));
+  }
+
   /* ★ 上翻插入的顺序：整批插入，历史必须正序（不能倒着来） */
   {
     const {createUI: mkUI} = await import('../apps/web/src/ui.js?order=1');

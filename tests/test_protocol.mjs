@@ -18,7 +18,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import * as Engine from '../packages/engine/src/index.js';
-import {createRoomCore} from '../apps/worker/src/core.js';
+import {createRoomCore, mergeOrder, planImport} from '../apps/worker/src/core.js';
 import {createMemoryStorage} from './memory_storage.mjs';
 import {toNdjson, fromNdjson, toBattle, exportAs, FORMAT} from '../apps/worker/src/export.js';
 import {ymdhm} from '../packages/engine/src/util.js';
@@ -567,33 +567,57 @@ console.log('== 22. ★ 战报导入：接在当前房间后面 + 按 msg_id 去
   eq('★ 坏行有记录', p2.errs.length, 1);
   eq('★ 空行不算坏行', fromNdjson('\n\n').errs.length, 0);
 
-  /* ★ 导入语义（room.js 的 /import 分支，这里验它依赖的两个存储方法契约）：
-   *   ① 接在 maxSeq 之后 ② 按 msg_id 去重 */
+  /* ★★ 导入语义：并入 + 按绝对时间重排（用户已定口径）★★ */
   const st = createMemoryStorage('IMP001');
   let t = 1772000000000;
   const core = createRoomCore(st, {now: () => (t += 1000)});
   await core.apply({reqId:'r1', text:'房内已有的一条', anonId:'a1', nick:'老王'});
-  /* ★ 先取**数量快照**再插入：st._all() 返回的是同一个数组引用，
-   *   插入后 cur.length 也跟着变 —— 拿它当"原有条数"就会算出错误的期望值。 */
   const before = st._all().length;
-  const cur = st._all();
-  const maxSeq = await st.maxSeq();
-  eq('★ 房间现有最大 seq', maxSeq, cur[cur.length - 1].seq);
+  const roomSeqBefore = (await st.getRoom()).seq;
 
-  const incoming = fromNdjson(toNdjson([mk(1, 'id-a'), mk(2, 'id-b')])).msgs;
-  const dup = await st.hasIds(incoming.map(m => m.id));
-  eq('★ 新战报里没有与现有消息重名的（不该被跳过）', dup.size, 0);
-  let base = maxSeq;
-  const list = incoming.filter(m => !dup.has(m.id)).map(m => Object.assign({}, m, {seq:++base}));
-  await st.insertMsgs(list);
-  eq('★ 导入后条数 = 原有 + 新增', st._all().length, before + 2);
-  ok('★ 导入的消息 seq 接在原有之后（不重排现有消息）',
-    list[0].seq > maxSeq, list[0].seq + ' > ' + maxSeq);
+  /* 战报里的时间**早于**房内现有消息 —— 重排后它必须排到前面，
+     这就是"按绝对时间并入"与"接在最后"的分水岭。 */
+  const incoming = fromNdjson(toNdjson([
+    {seq:1, id:'593353:1', ts:1771000000000, kind:'chat', from:'老王', actor:'老王',
+     anon_id:'a1', req_id:'old-1', rule_at:'generic', payload:{text:'更早的一条'}},
+    {seq:2, id:'593353:2', ts:1773000000000, kind:'chat', from:'老王', actor:'老王',
+     anon_id:'a1', req_id:'old-2', rule_at:'generic', payload:{text:'更晚的一条'}}
+  ])).msgs;
+  const plan = await planImport(st, incoming);
+  eq('★ 规划出 2 条新增', plan.add.length, 2);
+  eq('★ 没有已存在的（不该跳过）', plan.skipped, 0);
+  await st.reflow(plan);
+  const all = st._all();
+  eq('★ 导入后条数 = 原有 + 新增', all.length, before + 2);
+  /* ★ 关键断言：更早的那条必须排在房内原有消息**之前** */
+  const idxEarly = all.findIndex(m => m.id === '593353:1');
+  const idxLocal = all.findIndex(m => !String(m.id).startsWith('593353:'));
+  const idxLate  = all.findIndex(m => m.id === '593353:2');
+  ok('★ 更早的战报消息排到本房消息之前（按 ts 重排，不是接在最后）',
+    idxEarly < idxLocal && idxLocal < idxLate, `早=${idxEarly} 本房=${idxLocal} 晚=${idxLate}`);
+  ok('★ seq 与 ts 顺序一致（重排真的生效）',
+    all.every((m, i) => i === 0 || all[i - 1].ts <= m.ts), all.map(m => m.ts).join(','));
+  ok('★ seq 严格递增且连续', all.every((m, i) => i === 0 || all[i - 1].seq < m.seq));
+  /* ★ 导入的消息保留原 id：重复导入靠它认出来；来源房间也靠它标出来 */
+  ok('★ 导入的消息保留原 id', all.some(m => m.id === '593353:1'));
+  eq('★ 导入消息的 req_id 被清空（外房间的幂等键不能带进来）',
+    all.filter(m => String(m.id).startsWith('593353:')).every(m => m.req_id === null), true);
+  /* ★ 新 seq 从原 room.seq+1 起跳：保证新生成的 id 不可能撞上保留下来的旧 id */
+  ok('★ 新 seq 全部大于重排前的 room.seq（防 id 撞车）',
+    all.every(m => m.seq > roomSeqBefore), '原 room.seq=' + roomSeqBefore);
+  eq('★ room.seq 推进到新的最大值', (await st.getRoom()).seq, all[all.length - 1].seq);
 
   // 第二次导入同一份：全部命中已存在 → 跳过，不翻倍
-  const dup2 = await st.hasIds(incoming.map(m => m.id));
-  eq('★ 重复导入会全部命中（幂等）', dup2.size, 2);
+  const plan2 = await planImport(st, incoming);
+  eq('★ 重复导入全部命中（幂等）', plan2.skipped, 2);
+  eq('★ 幂等：没有新增', plan2.add.length, 0);
+  await st.reflow(plan2);
   eq('★ 幂等：条数不变', st._all().length, before + 2);
+
+  // 坏行不该让整份战报废掉
+  const p3 = fromNdjson('{"bad":1}\n');
+  eq('★ 坏行被收集而不是整批失败', p3.msgs.length, 0);
+  eq('★ 坏行有记录', p3.errs.length, 1);
 
   /* ★ 网关必须把 token 一起转发：只转 body 的话 DO 侧拿不到 token → bad_token。
    *   端到端真跑才发现（单测直接调 DO，绕开了网关这一层）。 */
@@ -606,11 +630,33 @@ console.log('== 22. ★ 战报导入：接在当前房间后面 + 按 msg_id 去
   const roomSrc = fs.readFileSync(path.join(ROOT, 'apps', 'worker', 'src', 'room.js'), 'utf8');
   ok('★ DO 侧 /import 要先验 token（导入会写库，不能谁都能来）',
     /url\.pathname === '\/import'[\s\S]{0,200}verifyToken/.test(roomSrc));
-  ok('★ 导入后会广播（不然别人看不到，只在自己刷新后才出现）',
-    /if\(list\.length\) this\.broadcast/.test(roomSrc));
+  /* ★ 重排后必须喊所有人重载：所有人的游标与本地去重集合都失效了，
+   *   不广播就会出现"每个人看到的顺序都不一样"，且无法自愈。 */
+  ok('★ 导入后广播 RELOAD（整房重载）', /this\.broadcast\(\{t:OUT\.RELOAD/.test(roomSrc));
+  ok('★ RELOAD 帧已加入协议', /RELOAD:'reload'/.test(fs.readFileSync(path.join(ROOT, 'packages', 'protocol', 'src', 'frames.js'), 'utf8')));
+  const uiSrc2 = fs.readFileSync(path.join(ROOT, 'apps', 'web', 'src', 'ui.js'), 'utf8');
+  ok('★ 客户端 RELOAD 时先清空再重载（不清会把整屏判成重播而丢弃）',
+    /function reset\(\)/.test(uiSrc2) && /reload\(f\)\s*\{[\s\S]{0,120}ui\.reset\(\)/.test(
+      fs.readFileSync(path.join(ROOT, 'apps', 'web', 'src', 'main.js'), 'utf8')));
 }
 
-console.log('== 23. ★ 页面标题 + D&D 角色卡增加 AC（真机反馈 · 第 3/5 条）==');
+console.log('== 23. ★ mergeOrder：排序键 = (ts, batch, 原 seq) ==');
+{
+  const cur = [{id:'L1', seq:1, ts:200}, {id:'L2', seq:2, ts:200}, {id:'L3', seq:3, ts:300}];
+  const inc = [{id:'F1', seq:9, ts:100}, {id:'F2', seq:8, ts:200}, {id:'F3', seq:7, ts:200}];
+  const o = mergeOrder(cur, inc);
+  /* 期望：F1(ts100) 最早；ts200 这一秒里 现有的 L1/L2 在前、导入的 F3(原seq7)/F2(原seq8) 在后；
+     L3(ts300) 最后。★ 注意 F3 在 F2 前 —— 它们在原房间的 seq 是 7/8，必须保住原先后。 */
+  eq('★ 排序键 = (ts, 现有优先, 原 seq)', JSON.stringify(o),
+    JSON.stringify(['F1', 'L1', 'L2', 'F3', 'F2', 'L3']));
+  eq('★ 同秒时现有的排在导入的之前（用户已定）', o.indexOf('L2') < o.indexOf('F3'), true);
+  eq('★ 导入批内部严格按原房间 seq 保序（指令→回复不乱）', JSON.stringify(mergeOrder([], inc)),
+    JSON.stringify(['F1', 'F3', 'F2']));
+  eq('★ 空房间导入', JSON.stringify(mergeOrder([], [])), '[]');
+  eq('★ 只导入不重排也安全', mergeOrder(cur, []).length, 3);
+}
+
+console.log('== 24. ★ 页面标题 + D&D 角色卡增加 AC（真机反馈 · 第 3/5 条）==');
 {
   const html = fs.readFileSync(path.join(ROOT, 'apps', 'web', 'index.html'), 'utf8');
   /* ① 标题：这是联网版，不是单机版 —— 标签页标题与顶栏都要改 */
@@ -640,6 +686,53 @@ console.log('== 23. ★ 页面标题 + D&D 角色卡增加 AC（真机反馈 · 
   const skillKeys = new Set((await import('../packages/engine/src/dnd.js')).DND_SKILLS.map(s => s.en));
   ok('★ AC 不参与检定（不是 .rc 的目标）', !skillKeys.has('ac') && !skillKeys.has('hp'),
     [...skillKeys].slice(0, 3).join(','));
+}
+
+console.log('== 25. ★★ 续期：导出/导入各续 30 天，接力链不断（用户已定）★★');
+{
+  const st = createMemoryStorage('RENEW01');
+  const T0 = 1772000000000;
+  let t = T0;
+  const core = createRoomCore(st, {now: () => (t += 1000)});
+  await core.apply({reqId:'r1', text:'一条老消息', anonId:'a1', nick:'老王'});
+
+  /* ① 导入即续期：导入的消息要带上 keep_until */
+  const incoming = [{seq:1, id:'593353:1', ts:T0 - 40 * 86400000, kind:'chat', from:'老王', actor:'老王',
+    anon_id:'a1', req_id:null, rule_at:'generic', payload:{text:'40 天前的'}}];
+  const plan = await planImport(st, incoming, T0);
+  eq('★ 导入的消息被续期', typeof plan.add[0].keep_until, 'number');
+  ok('★ 续期窗口 = 30 天', plan.add[0].keep_until - T0 === 30 * 86400000,
+    String(plan.add[0].keep_until - T0));
+  /* ★ 关键：这条消息**已经满 30 天**（40 天前），靠续期才活下来 */
+  ok('★ 已过期的老消息也能被续期救回', incoming[0].ts < T0 - 30 * 86400000);
+  await st.reflow(plan);
+  eq('★ 续期值落到库里', (await st.brief()).length, 2);
+  eq('★ 房间最晚续期截止可被读回（.status 显示用）',
+    await st.maxKeepUntil(), plan.add[0].keep_until);
+
+  /* ② 来源房间始终是最初的出生房间 —— 接力链 A→B→C 里 C 看到的仍是 A（用户已定）
+   *   且 id 不变意味着去重在整条链上都有效：同一段内容导进 C 两次不会变成两份。 */
+  eq('★ 来源房间 = id 前缀（不因中转而改变）', '593353:1'.split(':')[0], '593353');
+
+  /* ③ 清理必须双条件：满 30 天 **且** 没被续期 */
+  const roomSrc = fs.readFileSync(path.join(ROOT, 'apps', 'worker', 'src', 'room.js'), 'utf8');
+  ok('★ 清理带 keep_until 条件（不会删掉刚续期的老消息）',
+    /DELETE FROM messages WHERE ts < \? AND \(keep_until IS NULL OR keep_until <= \?\)/.test(roomSrc));
+  /* ④ 续期不能改 ts：ts 是排序键，改了会让老消息假装是刚发生的 */
+  ok('★ 续期单独存 keep_until，不改 ts',
+    /keep_until INTEGER/.test(fs.readFileSync(path.join(ROOT, 'apps', 'worker', 'src', 'schema.sql'), 'utf8')));
+  ok('★ 老房间也能长出 keep_until 列（迁移）',
+    /ALTER TABLE messages ADD COLUMN keep_until/.test(roomSrc));
+  /* ★ 导出续期必须覆盖"已被续期救活的"：只判 ts 会漏掉它们，
+   *   而接力链上正是这些老消息 —— 漏了就变成"导一次断一跳"。 */
+  ok('★ 导出续期覆盖已被续活的老消息（ts 过期但 keep_until 未过）',
+    /UPDATE messages SET keep_until = \? WHERE ts >= \? OR keep_until > \?/.test(roomSrc));
+
+  /* ⑤ 可见痕迹：.status 与战报都要写，否则无法验证续期生效 */
+  ok('★ .status 会显示"已续期至"', /keepUntil/.test(fs.readFileSync(path.join(ROOT, 'packages', 'engine', 'src', 'cmd.js'), 'utf8')));
+  ok('★ 战报里写明续期条数与截止日', /续期至/.test(fs.readFileSync(path.join(ROOT, 'packages', 'engine', 'src', 'render-md.js'), 'utf8')));
+  /* ⑥ 软提醒而不是硬拦截 */
+  ok('★ 容量是软提醒（超过阈值只提示，不拒绝导入）', /CAP_WARN/.test(roomSrc) && !/拒绝导入/.test(roomSrc));
 }
 
 console.log('---------------------------');

@@ -75,8 +75,20 @@ export function createSqliteStorage(db, code){
       return rows2msgs(q('SELECT * FROM messages WHERE kind = ? AND anon_id = ? ORDER BY seq DESC LIMIT ?', 'roll', anonId, n)).reverse();
     },
     /* ★ 现存量 COUNT(*)，不用 room.seq —— seq 删后不回退，30 天清理后虚高。与 room.js 同构。 */
-    async maxSeq(){ const r = run('SELECT MAX(seq) AS s FROM messages')[0]; return (r && r.s) || 0; },
     async hasIds(ids){ const has = new Set(run('SELECT id FROM messages').map(r => r.id)); return new Set((ids || []).filter(i => has.has(i))); },
+    async brief(){ return run('SELECT id, seq, ts FROM messages ORDER BY seq'); },
+    async reflow(plan){
+      (plan.reseq || []).forEach(([id, seq]) => run('UPDATE messages SET seq = ? WHERE id = ?', seq, id));
+      (plan.add || []).forEach(m => run('INSERT INTO messages (seq, id, ts, kind, from_name, actor, anon_id, req_id, rule_at, keep_until, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        m.seq, m.id, m.ts, m.kind, m.from, m.actor || null, m.anon_id || null, m.req_id || null, m.rule_at || null, m.keep_until || null, JSON.stringify(m.payload)));
+      if(plan.seqEnd != null) run('UPDATE room SET seq = ? WHERE id = 1', plan.seqEnd);
+      const map = new Map((plan.idem || []).map(([o, n]) => [o, n]));
+      run('SELECT req_id, seq FROM idempotency').forEach(r => {
+        if(map.has(r.seq)) run('UPDATE idempotency SET seq = ? WHERE req_id = ?', map.get(r.seq), r.req_id);
+        else run('DELETE FROM idempotency WHERE req_id = ?', r.req_id);
+      });
+    },
+    async maxKeepUntil(){ const r = one('SELECT MAX(keep_until) AS k FROM messages'); return (r && r.k) || null; },
     async countMsgs(){ return one('SELECT COUNT(*) AS c FROM messages').c; },
     async since(cursor, limit){ return rows2msgs(q('SELECT * FROM messages WHERE seq > ? ORDER BY seq LIMIT ?', cursor, limit)); },
     async recent(limit){ return run('SELECT * FROM messages ORDER BY seq DESC LIMIT ?', limit || 200).reverse().map(row2msg); },

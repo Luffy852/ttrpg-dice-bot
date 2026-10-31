@@ -34,13 +34,21 @@ export function createUI({code, onSubmit, onExport, onImport}){
     if(!a || a === '骰娘') return '';
     return '<span class="re' + (a === st.me ? ' me' : '') + '">→ ' + Engine.esc(a) + '</span>';
   }
+  /* ★ 来源房间标记：id 形如 `code:seq`，前缀就是这条消息出生的房间。
+   *   跨房间导入后，聊的是同一场跑团但来自两个房间 —— 不标出来复盘时会混淆。
+   *   本房间的消息不显示（自己人，标了反而吵）。 */
+  function srcTag(m){
+    const c = String(m.id || '').split(':')[0];
+    if(!/^\d{6}$/.test(c) || c === st.code) return '';
+    return '<span class="srctag">来自 ' + Engine.esc(c) + '</span>';
+  }
   /* ★ 渲染一条消息，返回 HTML（append 与 prepend 共用，不写两遍 —— 原则 4） */
   function htmlOf(m){
     if(m.kind === 'sys' || m.kind === 'notice') return Engine.renderMsg(toRenderable(m));
     const mine = (m.from && m.from !== '骰娘' && m.from === st.me);
     return '<div class="msg' + (mine ? ' me' : '') + '">' +
       '<div class="av">' + Engine.esc((m.from || '?').slice(0, 1)) + '</div>' +
-      '<div class="body"><div class="who">' + Engine.esc(m.from || '?') + replyTag(m) +
+      '<div class="body"><div class="who">' + Engine.esc(m.from || '?') + replyTag(m) + srcTag(m) +
       '<span class="ts">' + hhmm(m.ts) + '</span></div>' +
       Engine.renderMsg(toRenderable(m)) + '</div></div>';
   }
@@ -100,6 +108,21 @@ export function createUI({code, onSubmit, onExport, onImport}){
     refreshLoadBtn();
     refreshTop();
     return n;
+  }
+
+  /* ★ 整房重置：导入战报后服务端按时间重排了 seq，本地的渲染结果整体作废。
+   * 【为什么不能只补新的】重排会让**已有消息**的 seq 与位置全变，
+   *   而 seen 里记的是旧 id 集合 —— 若不清空，服务端重发的那批会被判为重播而整批丢弃，
+   *   结果就是"导入完什么都没变"，比报错还难查。 */
+  function reset(){
+    seen.clear();
+    pending.forEach(el => el.remove());
+    pending.clear();
+    if($loadBtn){ $loadBtn.remove(); $loadBtn = null; }
+    $stream.innerHTML = '';
+    oldestSeq = null; hasMoreOlder = false; loading = false;
+    st.msgTotal = null;
+    refreshTop();
   }
 
   function toBottom(){ $stream.scrollTop = $stream.scrollHeight; }
@@ -239,7 +262,7 @@ export function createUI({code, onSubmit, onExport, onImport}){
 
   return {
     append, prepend, appendPending, failPending, failAll, refreshTop, toBottom,
-    setPaging, doneLoadingOlder, onLoadOlder,
+    setPaging, doneLoadingOlder, onLoadOlder, reset,
     setRoom(r){
       if(r.rule) st.rule = r.rule;
       if(r.baredice != null) st.baredice = !!r.baredice;

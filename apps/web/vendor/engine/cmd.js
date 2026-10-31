@@ -207,7 +207,10 @@ function handleCommand(text, ctx){
       {k:'裸骰识别',   v:(room.baredice ? '开' : '关') + '　（.set baredice on 开启）'},
       {k:'在场人数',   v:(onl == null ? '—' : (onl + ' 人在线')) +
         (mem == null ? '' : ('　｜　累计接入 ' + mem + ' 人次'))},
-      {k:'消息留存',   v:'30 天 · 本房间共 ' + cnt + ' 条'}
+      /* ★ 写"最早一条将在 N 天后清理"而不是只有一句"30 天"：
+       *   续期生效后这个日期会往后推，用户看得见它动了 —— 否则没法验证续期是否工作。 */
+      {k:'消息留存',   v:'30 天 · 本房间共 ' + cnt + ' 条' +
+        (room.keepUntil ? ('　｜　已续期至 ' + room.keepUntil) : '')}
     ]}) + '<div class="hs"><div class="hh">我的角色卡' + (ctx.card ? ' · ' + esc(cardRuleName(ctx.card)) : '') + '</div>' +
       cardHtml + (warn ? '<div class="hf">' + warn + '</div>' : '') + '</div>');
     return {msgs:out, handled:true};

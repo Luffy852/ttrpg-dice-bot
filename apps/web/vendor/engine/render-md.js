@@ -125,6 +125,10 @@ export function renderBattleMd(msgs, meta){
     '',
     '> 规则：' + (m0.rule || '-') + '　｜　导出：' + (m0.exportedAt || '') + '　｜　共 ' + msgs.length + ' 条',
     '',
+    /* ★ 续期要说清楚：用户靠"导出"给消息续命，不写明续到哪天，
+     *   他就不知道下一次该什么时候再导一次（这是唯一能验证续期生效的地方）。 */
+    '> 本次导出已为 ' + (m0.renewed == null ? '—' : m0.renewed) + ' 条消息续期至 ' +
+      (m0.keepUntil ? ymdMd(m0.keepUntil) : '—') + '（默认 30 天清理，导出可以续命）',
     '> 30 天后房间消息会被清理 —— 这份战报是唯一的保全手段。NDJSON 版可原样回灌。',
     '',
   ];
@@ -140,7 +144,11 @@ export function renderBattleMd(msgs, meta){
     const who = (m.from === '骰娘')
       ? ('**骰娘**' + ((m.actor && m.actor !== '骰娘') ? (' → **' + m.actor + '**') : ''))
       : ('**' + (m.actor || m.from || '?') + '**');
-    body.push('* `' + hhmmMd(m.ts) + '` ' + who + ' · ' + renderMsgMd(r));
+    /* ★ 跨房间导入进来的消息要标出来源房间（id 形如 `code:seq`，前缀即出生房间）。
+     *   复盘时"这段是 593353 带过来的"是必要信息 —— 两个房间的同一场跑团不能混着看。 */
+    const src = String(m.id || '').split(':')[0];
+    const from = (/^\d{6}$/.test(src) && src !== String(m0.code || '')) ? ('（`来自 ' + src + '`）') : '';
+    body.push('* `' + hhmmMd(m.ts) + '` ' + who + from + ' · ' + renderMsgMd(r));
   });
   return head.concat(body).join('\n') + '\n';
 }

@@ -18,10 +18,13 @@ import {DurableObject} from 'cloudflare:workers';
 import {createRoomCore} from './core.js';
 import {checkIn, IN, ERR, OUT} from '../../../packages/protocol/src/frames.js';
 import {exportAs, FORMAT, fromNdjson} from './export.js';
+import {planImport, mergeOrder} from './core.js';
 import {ymdhm} from '../../../packages/engine/src/util.js';
 import {verifyToken, verifyPin, newSalt, hashPin, signToken, TOKEN_TTL} from './auth.js';
 
 const DAY = 86400000;
+/** 清理分界：早于这个时间的消息**本来就该被清理**了（导出续期时要排除它们） */
+const cut0 = () => Date.now() - KEEP_DAYS * DAY;
 /* ★ 离线判定（真机反馈 · B 组）：手机息屏后 ws 常常**收不到关闭帧** ——
  *   系统直接掐掉网络，服务端那条连接在自己看来仍是 OPEN（半开连接）。
  *   于是人已经走了、在线数还挂着 1，次数一多就累积成"永远多一个人"。
@@ -49,9 +52,13 @@ export const TABLES = [
   `CREATE TABLE IF NOT EXISTS members (
      anon_id TEXT PRIMARY KEY, cid TEXT, nick TEXT NOT NULL, joined_at INTEGER NOT NULL,
      last_seen INTEGER NOT NULL, msg_count INTEGER NOT NULL DEFAULT 0)`,
+  /* ★ keep_until：导出/导入时的"续期"截止（★ 用户已定：主动给消息续命的口子）
+   *   NULL = 按 ts 走 30 天常规清理；有值 = 到那个时间之前不会被清理。
+   *   不能改 ts（ts 是发生时间 + 排序键，改了会让老消息假装是刚发生的）。 */
   `CREATE TABLE IF NOT EXISTS messages (
      seq INTEGER PRIMARY KEY, id TEXT NOT NULL UNIQUE, ts INTEGER NOT NULL, kind TEXT NOT NULL,
-     from_name TEXT NOT NULL, actor TEXT, anon_id TEXT, req_id TEXT, rule_at TEXT, payload TEXT NOT NULL)`,
+     from_name TEXT NOT NULL, actor TEXT, anon_id TEXT, req_id TEXT, rule_at TEXT,
+     keep_until INTEGER, payload TEXT NOT NULL)`,
 
   `CREATE TABLE IF NOT EXISTS idempotency (req_id TEXT PRIMARY KEY, seq INTEGER NOT NULL, ts INTEGER NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS pcs (anon_id TEXT PRIMARY KEY, family TEXT NOT NULL,
@@ -72,9 +79,27 @@ export const INDEXES = [
   `CREATE INDEX IF NOT EXISTS idx_messages_req ON messages(req_id)`,
   `CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(anon_id, seq)`,
   `CREATE INDEX IF NOT EXISTS idx_idem_ts ON idempotency(ts)`,
+  `CREATE INDEX IF NOT EXISTS idx_messages_keep ON messages(keep_until)`,
 ];
 /** 兼容旧名（tools/check-worker.mjs 与其它引用） */
 export const SCHEMA = TABLES.concat(INDEXES);
+
+/** 战报消息的来源房间号：id 形如 `code:seq`，前缀就是它出生的房间 */
+export function srcRoomsOf(msgs){
+  const out = new Set();
+  (msgs || []).forEach(m => { const c = String(m.id || '').split(':')[0]; if(/^\d{6}$/.test(c)) out.add(c); });
+  return [...out];
+}
+
+/** ★ 软提醒：续期意味着"只要定期导出就能一直活着"，所以容量要能被感知。
+ *  只提醒不阻止 —— 主动维护的体量有限（用户已定），硬拦会在真有历史要接力时卡住。
+ *  但完全不提示也不行：堆到 DO 存储上限时是硬失败（写入报错），那时才发现就晚了。 */
+const CAP_WARN = 5000;
+function capNote(n){
+  if(!(n > CAP_WARN)) return null;
+  return '房间已有 ' + n + ' 条，超过 ' + CAP_WARN + ' 条后存储压力会变大 —— ' +
+    '不常用的老房间建议新开一间，别一直往这里堆';
+}
 
 export class RoomDO extends DurableObject {
   constructor(ctx, env){
@@ -87,6 +112,9 @@ export class RoomDO extends DurableObject {
      *   列已存在会抛 "duplicate column name" —— 吞掉即可（幂等靠 try/catch）。
      *   【为什么不重建表】房间里有 30 天的消息与角色卡，重建 = 数据清空。 */
     try{ this.sql.exec('ALTER TABLE members ADD COLUMN cid TEXT'); }catch(e){ /* 列已存在 */ }
+    /* ★ 同上：老房间不会自动长出 keep_until 列 —— 缺了它续期就是空的，
+     *   而续期是本轮的主功能，不能只在新建的房间里有效。 */
+    try{ this.sql.exec('ALTER TABLE messages ADD COLUMN keep_until INTEGER'); }catch(e){ /* 列已存在 */ }
     /* ★ 逐条建且不让它炸：索引只是加速，缺了最多变慢；而构造函数抛异常 =
      *   这个房间**彻底打不开**（HTTP 500 + ws 1006，009950 就是这样挂的）。
      *   顺序（ALTER 之后）已经保证了正常路径，这里是最后一道保险。 */
@@ -174,13 +202,38 @@ export class RoomDO extends DurableObject {
        *   「本房间共 N 条」一直虚高。idx_messages_ts 只是清理用的，COUNT 走主键全表扫，
        *   单房间最多几百条，成本可忽略。 */
       async countMsgs(){ return one('SELECT COUNT(*) AS c FROM messages').c; },
-      /* ★ 导入用：当前最大 seq（导入的消息接在它后面） */
-      async maxSeq(){ const r = one('SELECT MAX(seq) AS s FROM messages'); return (r && r.s) || 0; },
+      /* ★ .status 的"已续期至"：库里最晚的续期截止（NULL 会被 MAX 忽略） */
+      async maxKeepUntil(){ const r = one('SELECT MAX(keep_until) AS k FROM messages'); return (r && r.k) || null; },
       /* ★ 导入去重：已存在的 msg_id 一律跳过（重名即同一条消息，重复导入不该翻倍） */
       async hasIds(ids){
         const out = new Set();
         ids.forEach(id => { if(one('SELECT 1 FROM messages WHERE id = ?', id)) out.add(id); });
         return out;
+      },
+      /* ★ 全量 (id, seq, ts) —— 导入重排要按 ts 重算顺序，只要这三个字段，不搬 payload */
+      async brief(){
+        return q('SELECT id, seq, ts FROM messages ORDER BY seq').map(r => ({id:r.id, seq:r.seq, ts:r.ts}));
+      },
+      /* ★★ 一次性落库：改 seq + 插入新消息 + 推进 room.seq + 搬幂等表 ★★
+       * 【为什么必须一个事务】seq 重排是"全表顺序"的改写，做一半就等于房间顺序损坏：
+       *   一半消息是新 seq、一半是旧 seq → 补齐与首屏都会拿到错乱的结果，且无法自愈。
+       *   SQLite 事务要么全成要么全不成，这是唯一能接受的结果。 */
+      async reflow(plan){
+        ctx.storage.transactionSync(() => {
+          (plan.reseq || []).forEach(([id, seq]) => sql.exec('UPDATE messages SET seq = ? WHERE id = ?', seq, id));
+          (plan.add || []).forEach(m => sql.exec(
+            'INSERT INTO messages (seq, id, ts, kind, from_name, actor, anon_id, req_id, rule_at, keep_until, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            m.seq, m.id, m.ts, m.kind, m.from, m.actor || null, m.anon_id || null,
+            m.req_id || null, m.rule_at || null, m.keep_until || null, JSON.stringify(m.payload)));
+          if(plan.seqEnd != null) sql.exec('UPDATE room SET seq = ? WHERE id = 1', plan.seqEnd);
+          /* 幂等表里的旧 seq 按映射搬过去；搬不动的（对应消息已被清理）直接删 ——
+             留着会让重试拿到一个指向空气的 seq。 */
+          const map = new Map((plan.idem || []).map(([o, n]) => [o, n]));
+          q('SELECT req_id, seq FROM idempotency').forEach(r => {
+            if(map.has(r.seq)) sql.exec('UPDATE idempotency SET seq = ? WHERE req_id = ?', map.get(r.seq), r.req_id);
+            else sql.exec('DELETE FROM idempotency WHERE req_id = ?', r.req_id);
+          });
+        });
       },
       async since(cursor, limit){
         return q('SELECT * FROM messages WHERE seq > ? ORDER BY seq LIMIT ?', cursor, limit).map(row2msg);
@@ -284,33 +337,38 @@ export class RoomDO extends DurableObject {
       return Response.json(r);
     }
 
-    /* ★ 导入：把 NDJSON 战报灌回**当前房间**（用户已定口径 · 真机反馈第 8 条）
-     *  【为什么接在后面而不是"恢复成原样"]seq 是房间内的单调递增游标，
-     *   重排现有消息会让已经在别人页面上的 seq 全部错位（补齐与重连都以 seq 为准）。
-     *   接在后面 + 按 msg_id 去重 = 安全且幂等的"补回"。
-     *  【为什么按 id 去重而不是 seq】导出的 msg_id 是全局唯一且稳定的；
-     *   seq 在导入后会被重排，拿它去重第二次就失效了。 */
+    /* ★★ 导入：把战报并入本房间，并按**绝对时间**重排整房顺序 ★★
+     *  【为什么是"并入 + 重排"而不是"接在后面"】seq 同时是显示顺序与客户端游标，
+     *   只接在后面会让旧消息永远排在新消息之后 —— 跨房间带过来的历史就失去了时间线索，
+     *   而这正是导入的意义（用户已定口径）。重排逻辑见 core.js 的 planImport / mergeOrder。
+     *  【跨房间】消息 id 里带着来源房间号（code:seq），导入时**保留原 id**：
+     *   ① 重复导入认得出（幂等）② 能标出"这条来自哪个房间"
+     *   ③ 换个房间再导一次也不会撞 id（前缀不同）。 */
     if(url.pathname === '/import'){
       const v = await verifyToken(url.searchParams.get('token'), this.env.PIN_SECRET);
       if(!v.ok) return Response.json({error:v.why}, {status:401});
       let body = {};
       try{ body = await req.json(); }catch(e){ return Response.json({error:'bad_body'}, {status:400}); }
       const parsed = fromNdjson(String(body.text || ''));
-      const st = this.storage();
-      const dup = await st.hasIds(parsed.msgs.map(m => m.id));
-      const fresh = parsed.msgs.filter(m => !dup.has(m.id));
-      let base = await st.maxSeq();
-      const list = fresh.map(m => Object.assign({}, m, {seq:++base}));
-      if(list.length){
-        try{ await st.insertMsgs(list); }
-        catch(e){ return Response.json({error:'write_failed', why:String(e.message || e)}, {status:500}); }
-        this.sql.exec('UPDATE room SET seq = ? WHERE id = 1', base);
-      }
-      /* ★ 导入的消息要给所有人看见：否则导入者自己刷新看得到、别人看不到，
-       *   下一句指令才会把它挤出来 —— 那种"时有时无"最难排查。 */
-      if(list.length) this.broadcast({t:OUT.BATCH, msgs:list, cursor:base});
-      return Response.json({imported:list.length, skipped:dup.size,
-        errors:parsed.errs, total:await st.countMsgs()});
+      if(!parsed.msgs.length) return Response.json({imported:0, skipped:0, errors:parsed.errs,
+        total:await this.storage().countMsgs(), note:'没有可导入的消息'});
+      const plan = await planImport(this.storage(), parsed.msgs);
+      if(!plan.add.length) return Response.json({imported:0, skipped:plan.skipped,
+        errors:parsed.errs, total:await this.storage().countMsgs(), note:'这些消息已经在房间里了'});
+      try{ await this.storage().reflow(plan); }
+      catch(e){ return Response.json({error:'write_failed', why:String(e.message || e)}, {status:500}); }
+
+      const total = await this.storage().countMsgs();
+      /* ★ 导入即续期后，"已满 30 天"不再是要被删的意思 —— 它会被续上 30 天。
+       *   这里报的是**续期前已经过期**的条数，让用户知道有多少是靠本次续期救回来的。 */
+      const cut = Date.now() - KEEP_DAYS * DAY;
+      const rescued = plan.add.filter(m => m.ts < cut).length;
+      /* ★ 顺序变了 → 所有人的游标与本地去重集合全部失效，必须整房重载。
+       *   不广播的话：自己刷新看得到新顺序，别人要等下一条指令才被"挤"出来，
+       *   期间每个人看到的顺序都不一样 —— 那种不一致最难排查。 */
+      this.broadcast({t:OUT.RELOAD, code:this.code, imported:plan.add.length, total});
+      return Response.json({imported:plan.add.length, skipped:plan.skipped, errors:parsed.errs,
+        total, rescued, from:srcRoomsOf(plan.add), cap:capNote(total)});
     }
 
     if(url.pathname === '/export'){
@@ -321,10 +379,23 @@ export class RoomDO extends DurableObject {
         .map(r => ({seq:r.seq, id:r.id, ts:r.ts, kind:r.kind, from:r.from_name, actor:r.actor,
                     anon_id:r.anon_id, req_id:r.req_id, rule_at:r.rule_at, payload:JSON.parse(r.payload)}));
       const room = this.sql.exec('SELECT rule FROM room WHERE id = 1').toArray()[0] || {};
+      /* ★★ 导出即续期（用户已定：主动给消息续命的口子）★★
+       * 【为什么在导出时做】导出是"我还要这些内容"的明确动作 —— 比任何隐式规则都准。
+       * 【为什么是可接力的一环】A 的战报导进 B 时会被续期一次；B 再导出时又续一次，
+       *   且这批消息在 B 的战报里以 B 的身份出现 —— 于是 A→B→C 的接力成为可能。
+       * 【为什么不是绝对豁免】绝对豁免 = 无上限堆积；这里给的是"每次导出续 30 天"，
+       *   你不主动导，它照常在 30 天后消失 —— 保留默认清理，只在用户明确要时延长。 */
+      const until = Date.now() + KEEP_DAYS * DAY;
+      /* ★ 续"当前还活着"的：未过期(ts >= cut) **或** 已被续期救活的(keep_until > now)。
+       *   只判 ts 会漏掉后者 —— 而那正是靠接力保下来的老消息，
+       *   用户说的"每次导出都是一次刷新"就断在这一跳上。 */
+      const cut = cut0();
+      this.sql.exec('UPDATE messages SET keep_until = ? WHERE ts >= ? OR keep_until > ?', until, cut, Date.now());
+      const renewed = this.sql.exec('SELECT COUNT(*) AS c FROM messages WHERE keep_until = ?', until).toArray()[0].c;
       const out = exportAs(all, {code:this.code, rule:room.rule,
         /* ★ 与消息时间同一个 UTC+8 格式化器：原来用 toISOString（UTC），
          *   同一份战报里"导出时间"与"消息时间"差 8 小时（真机反馈 · 第 6 条）。 */
-        exportedAt:ymdhm(Date.now())},
+        exportedAt:ymdhm(Date.now()), renewed, keepUntil:until},
         (url.searchParams.get('format') === FORMAT.MD) ? FORMAT.MD : FORMAT.NDJSON);
       return new Response(out.body, {headers:{'content-type':out.type,
         'content-disposition':'attachment; filename="' + out.name + '"'}});
@@ -499,8 +570,11 @@ export class RoomDO extends DurableObject {
       this.sql.exec('UPDATE room SET notified_clean = 1 WHERE id = 1');
       this.broadcast({t:OUT.BATCH, msgs:[msg], cursor:base});
     }
-    // ② 日常清理：只 DELETE（★ SQLite 删行不缩磁盘；VACUUM 锁库，只在 500M 全局触发时跑）
-    this.sql.exec('DELETE FROM messages WHERE ts < ?', cut);
+    /* ② 日常清理：只 DELETE（★ SQLite 删行不缩磁盘；VACUUM 锁库，只在 500M 全局触发时跑）
+     * ★★ 双条件：满 30 天 **且** 没被续期。
+     *   只判 ts 会把"刚续过期的老消息"删掉 —— 那正是用户主动保下来的内容，
+     *   静默删掉等于这个功能没实现。 */
+    this.sql.exec('DELETE FROM messages WHERE ts < ? AND (keep_until IS NULL OR keep_until <= ?)', cut, now);
     this.sql.exec('DELETE FROM idempotency WHERE ts < ?', cut);   // 与消息同窗口，避免 dup 指向已删消息
     this.sql.exec('UPDATE room SET last_active = ? WHERE id = 1', now);
     // ③ 顺带巡检在线连接；有人在就一分钟后继续巡，没人就退回每日清理

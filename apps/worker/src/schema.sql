@@ -54,9 +54,14 @@ CREATE TABLE IF NOT EXISTS messages (
   anon_id   TEXT,                          -- NULL = 骰娘
   req_id    TEXT,                          -- 客户端幂等键
   rule_at   TEXT,                          -- ★ 事实快照：掷骰/判定当时的规则
+  keep_until INTEGER,                      -- ★ 续期截止：NULL = 按 ts 走 30 天常规清理
   payload   TEXT    NOT NULL               -- JSON，只存事实（派生值一律不落库）
 );
-CREATE INDEX IF NOT EXISTS idx_messages_ts     ON messages(ts);          -- 30 天清理
+/* ★ keep_until 为什么不直接改 ts：ts 是**发生时间**，是排序键也是内容的一部分。
+ *   把续期写进 ts 会让老消息假装是刚发生的 —— 排序错位（它会被排到今天的消息里），
+ *   且战报里的时间全错。续期只影响"什么时候可以被清理"，就单独存一个字段。 */
+CREATE INDEX IF NOT EXISTS idx_messages_keep  ON messages(keep_until);   -- 清理：ts 与 keep_until 双条件
+CREATE INDEX IF NOT EXISTS idx_messages_ts    ON messages(ts);           -- 30 天清理
 CREATE INDEX IF NOT EXISTS idx_messages_req    ON messages(req_id);      -- 幂等回查
 -- ★ idx_sender：v1 就建。导出筛选（v2）要用，而**补索引属于 schema 迁移**，现在建边际成本≈0
 CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(anon_id, seq);

@@ -40,8 +40,13 @@ const db = new SQL.Database();
   ok('表齐：room/members/messages/idempotency/pcs',
     ['idempotency','members','messages','pcs','room'].every(t => tables.includes(t)), tables.join(','));
   const idx = db.exec("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx%'")[0].values.flat();
-  ok('建出 4 个索引（含 idx_sender）', idx.length === 4, idx.join(','));
+  /* ★ 按**名字**断言而不是数个数：数个数的断言每加一个索引就要改一次，
+   *   而真正要保证的是"该有的都在"（漏一个索引只会让清理/查询变慢，不报错 —— 更难发现）。 */
+  const need = ['idx_messages_ts', 'idx_messages_req', 'idx_messages_sender', 'idx_idem_ts', 'idx_messages_keep'];
+  ok('建出全部索引', need.every(n => idx.includes(n)), '缺：' + need.filter(n => !idx.includes(n)).join(','));
   ok('★ idx_messages_sender 现在就建（v2 导出筛选不迁移）', idx.includes('idx_messages_sender'));
+  /* ★ 续期要按 keep_until 查，没索引的话清理每次全表扫 —— 房间大起来会拖慢 alarm */
+  ok('★ idx_messages_keep 已建（清理的双条件要用）', idx.includes('idx_messages_keep'));
   // 单行表约束
   let e2 = null;
   try{ db.run("INSERT INTO room (id, code, created_at, last_active) VALUES (2, 'x', 1, 1)"); }

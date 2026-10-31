@@ -86,6 +86,9 @@ export function createNet({code, token, nick, on = {}, backoffBase = 1000}){
       }
       return;
     }
+    /* ★ 整房重载：导入战报后整房按时间重排了，本地的游标与去重集合全部失效。
+     *   必须由服务端主动喊一声 —— 客户端不可能自己知道"顺序被改了"。 */
+    if(f.t === OUT.RELOAD){ cursor = 0; return on.reload && on.reload(f); }
     if(f.t === OUT.ACK)     return on.ack && on.ack(f.req_id, f.seq);
     if(f.t === OUT.DUP)     return on.dup && on.dup(f.req_id, f.seq, f.deleted);
     if(f.t === OUT.REJECT)  return on.reject && on.reject(f.req_id, f.code);
@@ -104,6 +107,8 @@ export function createNet({code, token, nick, on = {}, backoffBase = 1000}){
     /** @returns {string} req_id —— 重试必须用同一个，否则会掷第二次 */
     send(text){ const reqId = nextReq(); post({t:IN.CMD, req_id:reqId, text}); return reqId; },
     sync(){ post({t:IN.SYNC, cursor, limit:PAGE}); },
+    /** ★ 重新走一遍进房流程：拿最新的首屏（重排后必须调，否则看到的是旧顺序） */
+    resync(){ cursor = 0; post({t:IN.HELLO, v:PROTOCOL_VERSION, token, cursor:0, nick}); },
     history(beforeSeq){ post({t:IN.HISTORY, before_seq:beforeSeq, limit:PAGE}); },
     close(){ dead = true; stopBeat(); if(ws) ws.close(1000, 'bye'); },
     get cursor(){ return cursor; },

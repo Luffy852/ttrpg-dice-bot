@@ -92,15 +92,23 @@ function enter(r){
     async onImport(text, name){
       if(!text || !text.trim()) return ui.note('这个文件是空的');
       const lines = text.split('\n').filter(x => x.trim()).length;
-      if(!confirm('把这份战报导入当前房间 ' + room.code + '？\n\n文件：' + (name || '战报') +
-        '\n共 ' + lines + ' 行\n\n已存在的消息会自动跳过，可重复导入。')) return;
+      /* ★ 说清楚两件事：① 是**并入并按时间重排**（不是接在最后）② 可以跨房间 */
+      if(!confirm('把这份战报并入当前房间 ' + room.code + '？\n\n文件：' + (name || '战报') +
+        '\n共 ' + lines + ' 行\n\n· 消息按**发生时间**并入全部消息并重排（不是接在最后）\n' +
+        '· 可以是别的房间的战报（会标出来源房间号）\n' +
+        '· 导入的消息会被续期 30 天（相当于重新计时）\n' +
+        '· 已存在的消息自动跳过，可重复导入')) return;
       ui.note('正在导入…');
       try{
         const r = await api('/api/room/' + room.code + '/import', {text});
-        ui.note('导入完成：新增 <b>' + r.imported + '</b> 条' +
+        let msg = '导入完成：新增 <b>' + r.imported + '</b> 条' +
           (r.skipped ? ('，跳过已存在的 ' + r.skipped + ' 条') : '') +
           (r.errors && r.errors.length ? ('，<b>' + r.errors.length + ' 行无法解析</b>') : '') +
-          '。房间现有 ' + r.total + ' 条');
+          '。房间现有 ' + r.total + ' 条，已按时间重排';
+        if(r.from && r.from.length) msg += '（来自房间 ' + r.from.join(' / ') + '）';
+        if(r.rescued) msg += '。其中 <b>' + r.rescued + '</b> 条原本已满 30 天，本次导入已给它们续期 30 天';
+        if(r.cap) msg += '。<b>' + r.cap + '</b>';
+        ui.note(msg);
       }catch(e){
         ui.note('导入失败：' + (e.message || e));
       }
@@ -138,6 +146,14 @@ function enter(r){
        *   因为前端只在进房时拿过一次昵称，之后 presence 只用来显示人数。
        * 【做法】presence 带 members（含 anon_id + nick），按 anon_id 找到自己并回写。
        *   顺便把本地记住的昵称也更新 —— 否则下次打开首页自动带入的还是旧名。 */
+      /* ★ 整房重载：服务端把全房消息按时间重排了（有人导入了战报）。
+       *   这里必须先 reset 再 resync —— 顺序反了会把重发的一整屏判成重播而全部丢弃。 */
+      reload(f){
+        ui.reset();
+        net.resync();
+        ui.note('有人导入了战报，房间消息已按时间重排（新增 <b>' + (f.imported || 0) +
+          '</b> 条，共 <b>' + (f.total || 0) + '</b> 条）');
+      },
       presence(list, online, total){
         ui.setMembers(list, online, total);
         const mine = (list || []).find(m => myAnon && m.anon_id === myAnon);

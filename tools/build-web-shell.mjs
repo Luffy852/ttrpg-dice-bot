@@ -46,6 +46,16 @@ html = html.replace('<button class="quick" data-cmd=".set baredice on">.set bare
   /* ★ 隐藏的 file 控件：<button> 无法直接触发选文件，必须借一个真实的 input[type=file] */
   '\n      <input type="file" id="file-import" accept=".ndjson,.json,.txt" hidden>');
 
+/* ②′ 新增样式：加载更早的入口 + 来源房间标记（index.html 里的都不能手改，这里是唯一出处） */
+/* ★ 锚点必须是 legacy 里**本来就有**的那一行 —— 拿一个本次才加的选择器当锚点，
+   第二次跑脚本时它已经不在了，替换会静默失效（我刚踩过：样式加完一 build 全没了）。 */
+html = html.replace('.notice b{color:#374151}',
+  '.notice b{color:#374151}\n' +
+  '.loadbtn{align-self:center;background:#fff;border:1px solid var(--line);border-radius:999px;padding:6px 14px;font-size:12.5px;color:#4b5563;cursor:pointer;user-select:none}\n' +
+  '.loadbtn:active{background:#f1f3f7}\n' +
+  '.srctag{font-size:11px;color:#9aa1ad;background:#f4f5f8;border:1px solid #e8eaef;border-radius:999px;padding:0 6px;margin:0 4px}');
+if(!/\.loadbtn\{/.test(html) || !/\.srctag\{/.test(html)) throw new Error('新增样式没注入成功：锚点变了？');
+
 /* ③ 进房页：加在 #app 之前（默认显示，进房成功后隐藏） */
 const GATE = `
 <div id="gate">
