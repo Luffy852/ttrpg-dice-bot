@@ -1,7 +1,19 @@
 # 在线多房间骰娘 · M3 仓库
 
-> 状态：**阶段 0（工程地基）+ 协议内核 已完成并通过验证**；Worker / DO 的 IO 层与前端尚未动。
+> 状态：**已上线运行**（Cloudflare Workers + Durable Object，前端零构建托管）。
+> **2026-11-01：真机验收轮的全部改动已部署，等待测试评估。**
 > 上一阶段产物（M2 单文件引擎）冻结在 `legacy/`，只作对照，不再改动。
+>
+> **★ 新读者请先读 `docs/交接文档_v3.md`** —— 它记录了最新一轮真机验收修了什么、哪些口径已拍板、
+> 哪些还没验。`CHECKPOINT.md` 是历史演进，本文件是工程结构与铁律。
+
+---
+
+## 0.5 关于文档里的数字
+
+下面第 1 节是**阶段 0 那一轮**的记录，里面的 "676 项" 是**当时**的数字，保留原样不回改。
+**当前基线（2026-11-01）是：引擎 722×2 · 协议 216 · schema 28 · Worker 103 · 接口检查 27 ·
+静态资源 231 · 变异 22/22 · 快照 19 条**，以 `docs/交接文档_v3.md` 为准。
 
 ---
 
@@ -68,21 +80,34 @@ npm run check:all         # 上面全部串起来跑
 ## 5. 目录现状
 
 ```
-packages/engine/src/      21 个 ESM 模块 + replay.js（引擎，浏览器与 Worker 同一份）
+packages/engine/src/      25 个 ESM 模块（含 replay.js / render-md.js，浏览器与 Worker 同一份）
 packages/protocol/src/    frames.js / payload.js / cursor.js（前后端共用）
 apps/worker/src/
-  core.js                 ★ 房间内核（纯逻辑：幂等 / 游标 / 防重掷 / 事实化）
+  core.js                 ★ 房间内核（纯逻辑：幂等 / 游标 / 防重掷 / 事实化 / 导入重排）
   schema.sql              ★ DO 的 SQLite schema（唯一出处）
-  room.js / index.js …    待做（DO 与 HTTP 路由，只剩 IO 胶水）
-apps/web/                 待做（沿用 M2 的 DOM 与 CSS，呈现一版不动）
+  room.js                 DO：ws 收发 / 广播 / alarm（30 天清理 + 半开连接巡检）
+  index.js                HTTP 路由网关（建房间 / join / meta / 导出 / 导入 / ws 转发）
+  export.js               NDJSON（可回灌）+ Markdown 战报
+apps/web/                 前端零构建：原生 ESM，整个目录托管
+  index.html              ★ 由 tools/build-web-shell.mjs 从 legacy 生成，**不要手改**
+  src/main.js             进房 / 发指令 / 导入导出接线
+  src/net.js              ws：重连退避 / 游标补齐 / 心跳
+  src/ui.js               聊天流呈现（沿用 M2 真机验过的 DOM 与 CSS）
+  src/batch.js            ★ 批次分发的**唯一实现**（生产与冒烟共用，不许各写一份）
+  vendor/                 引擎与协议的浏览器侧副本（由 tools 同步，防漂移）
 tools/
-  split-engine.mjs        一次性迁移脚本（保留以备复核）
-  load-engine.js          拼接路加载器
-  check-engine-split.js   拆包自检 5 项
+  build-web-shell.mjs     从 legacy 生成 index.html（顶栏 / 进房页 / 新增样式都在这里加）
+  load-engine.js          拼接路加载器（★ 剥 import 靠正则，export 必须单行）
+  check-engine-split.js   拆包自检
+  check-worker.mjs        ★ 三份 storage 实现逐方法对齐 + schema 唯一出处
+  gen-render-snapshot.mjs 渲染产物逐字节快照
 tests/
   test_engine.js / test_engine_esm.mjs / mutate_engine_test.js
-  test_protocol.js        协议层 51 项
-  memory_storage.js       core.js 的内存替身（同接口，DO 版换成 SQLite）
+  test_protocol.mjs       协议层 216 项
+  test_schema.mjs         真 SQLite 跑 schema + DO storage 同构实现
+  test_worker.mjs         PIN / token / 导出回灌 / 战报同源
+  dom_smoke.js            jsdom 跑 index.html + 内存服务端（端到端）
+  memory_storage.mjs / sqlite_storage.mjs   core.js 的两份 storage 替身
 legacy/M2_骰娘单机可摸版.html   M2 冻结存档（对照用，不改）
 ```
 
@@ -90,17 +115,30 @@ legacy/M2_骰娘单机可摸版.html   M2 冻结存档（对照用，不改）
 
 ## 6. 已验证 vs 未验证（★ 别混为一谈）
 
-**已验证（沙盒内真跑真断言）**
-- 引擎 676 项 ×2 路、变异 22/22、拆包自检 5 项
-- 协议：幂等防重掷（重发同 `req_id` 不多掷一颗骰）、seq 单调、重连补齐无重复无遗漏、
-  客户端 `msg_id` 去重、超长/限流显式拒、payload 不含 total/verdict（原则 6）、
-  **从 payload 还原的判定与引擎当时产出逐字一致**（COC 困难成功 / FU 暴击 / DH 关键成功）
-- `core.js` 的全部机制（纯逻辑 + 注入 storage，不需要 Cloudflare）
+**已验证（沙盒内真跑真断言，2026-11-01 基线）**
 
-**未验证（只能由你真机部署后验）**
-- Cloudflare Worker / Durable Object 的**真实部署**（沙盒无账号鉴权，部署不了）
-- 多设备进房的广播一致性与延迟、真机断网重连、PIN 流程
-- 30 天 / 500M 清理的实际触发
+| 测试 | 数字 |
+|---|---|
+| 引擎（拼接路 / 真 ESM 路） | 722 / 0 ×2 |
+| 协议层 | 216 / 0 |
+| schema 与 storage（真 SQLite） | 28 / 0 |
+| Worker 纯逻辑 | 103 / 0 |
+| Worker 接口检查（三份 storage 对齐） | 27 / 0 |
+| 静态资源自检 | 231 / 0 |
+| 变异测试 | 22 / 22 |
+| 渲染快照 | 19 条逐字节一致 |
+| 端到端冒烟（jsdom） | 全通过 |
+
+另有**本地真实运行时**（workerd）：能跑 DO 与 ws，本轮多个只有端到端才暴露的 bug
+（网关丢 cid / 忘转 token 查询串）都靠它发现。用法见 `docs/交接文档_v3.md` 第 2 节。
+
+**未验证（只能真机验）**
+- 30 天清理的实际触发、提前 7 天广播
+- **续期的实际生效**（现在只能确认 `keep_until` 写进去了，要等 30 天后看老消息还在不在）
+- 500 MB 全局清理
+- 8 人同时在线的扇出延迟
+- 手机上翻手势（用户因自动加载生效，未真机确认入口出现过）
+- 跨房间导入在**真实两个房间**之间跑一遍（已有的是脚本造的数据）
 
 > 这两栏分开写，是为了避免"本地跑通 = 验过了"的错觉（手册增补 6.6 新增盲区第 1 条）。
 
@@ -108,11 +146,16 @@ legacy/M2_骰娘单机可摸版.html   M2 冻结存档（对照用，不改）
 
 ## 7. 下一轮做什么
 
-1. `apps/worker/src/room.js`：用 `schema.sql` 实现 `core.js` 的 storage 接口（SQLite）+ ws 广播 + alarm
-2. `apps/worker/src/index.js`：HTTP 路由（建房间 / 加入 / meta / 导出）+ 静态资源
-3. `apps/web/`：沿用 M2 的 DOM 与 CSS，只换数据来源（ws 而非本地计算），呈现**一版不动**
-4. 前端 `dom_smoke.js` 改为跑 `apps/web/index.html` + mock WebSocket
-5. 部署指引与自查清单（`wrangler.toml` + GitHub Actions）
+**2026-11-01 的状态：代码已全部部署，下一步是真机测试评估 + 修反馈。**
+
+新对话的优先级（详见 `docs/交接文档_v3.md` 第 4 节）：
+
+1. **短期可验**：真实两个房间之间跑一次跨房间导入、手机上翻入口、来源标注显示效果
+2. **等时间**：30 天清理、续期生效
+3. **需拉人**：8 人并发
+
+**动代码前先读交接文档 v3 第 3 节（已拍板的 10 条口径）与第 5 节（6 个"别改回去"）。**
+用户明确要求：**有非唯一性方案时先提建议让他定，再写代码实现落盘。**
 
 ---
 
