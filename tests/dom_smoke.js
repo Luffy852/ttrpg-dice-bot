@@ -555,6 +555,27 @@ function type(ui, net, text){
       !/1–99/.test(b2) && /DB 0/.test(b2), b2.slice(-100));
   }
 
+  /* ★ J8 前置：导入链路的 token 与状态码（2026-11-02 真机「新增 undefined 条」）
+   * 【为什么用源码断言】main.js 的 onImport 依赖 gate / fetch / room 对象，jsdom 里跑不完整；
+   *   而 e2e_real 那层会真跑一个"故意不带 token"的请求验网关状态。两层合起来才锁住：
+   *   前端有没有拼 token（这里）、网关有没有透传状态（那里）。 */
+  {
+    const main = fs.readFileSync(path.join(__dirname, '../apps/web/src/main.js'), 'utf8');
+    const gw = fs.readFileSync(path.join(__dirname, '../apps/worker/src/index.js'), 'utf8');
+    ok('★ 前端 onImport 的请求拼了 token（与 /export 一致）',
+      /\/import\?token='\s*\+\s*encodeURIComponent\(room\.token\)/.test(main), main.slice(0, 60));
+    ok('★ 前端有「回包必须是数字」的守卫（错误不再伪装成成功）',
+      /typeof r\.imported !== 'number'/.test(main) && /typeof r\.total !== 'number'/.test(main));
+    ok('★ 网关定义了 proxyDO 且用它转发 import（连 HTTP 状态一起）',
+      /const proxyDO = async \(path, init\)/.test(gw) &&
+      /return JSON_\(await r\.json\(\), r\.status\)/.test(gw) &&
+      /proxyDO\('\/import\?/.test(gw));
+    ok('★ meta / history / export 也不再吞 DO 的状态码',
+      /if\(sub === '\/meta'\)\s+return proxyDO/.test(gw) &&
+      /if\(sub === '\/history'\)\s+return proxyDO/.test(gw) &&
+      /status:r\.status/.test(gw));
+  }
+
   /* ★ .help 的「当前规则」：规则名只在小标题里，不再单独重复一行、也不再出现"规则键"
    * 【为什么这条要断言】F 组把"规则键"从 .status 里删掉了，help 里漏了一处 ——
    *   这是典型的"横切决策只落实一处"。规则键（dnd5r）是机器标识，对玩家没有意义。 */

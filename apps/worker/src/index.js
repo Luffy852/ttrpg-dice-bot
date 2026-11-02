@@ -127,6 +127,17 @@ export default {
     if(m){
       const code = m[1], sub = m[2] || '';
       const stub = stubOf(env, code);
+      /* ★★ DO 回包必须连 HTTP 状态一起透传（J8 真机事故的根因之一）★★
+       * 【症状】导入战报显示"新增 undefined 条 / 房间现有 undefined 条"，但没有任何报错。
+       * 【链路】前端漏带 token → DO 返回 401 {error:'bad_token'} → 网关只透传 body、
+       *   JSON_ 默认 200 → 前端 api() 看 r.ok=true 不抛错 → 把错误对象当成功回包渲染。
+       * 【为什么比报错更糟】错误被伪装成成功，且文件根本没被解析，用户会以为"战报格式不兼容"。
+       * 【为什么统一改】join 早就是 `JSON_(await r.json(), r.status)`，说明本就该透传；
+       *   meta / history / import 三处漏了 —— 同类坑只修一处，下次还会从别处冒出来。 */
+      const proxyDO = async (path, init) => {
+        const r = await doFetch(stub, path, init);
+        return JSON_(await r.json(), r.status);
+      };
       if(sub === '/join' && request.method === 'POST'){
         let b = {}; try{ b = await request.json(); }catch(e){}
         /* ★ cid 必须一起转发（真机踩到）：这里原先只转 {nick, pin}，
@@ -137,20 +148,23 @@ export default {
          *   网关丢字段 = 前端又拿默认"玩家"当自己 —— 上次 cid 就是这么丢的。 */
         return JSON_(await r.json(), r.status);
       }
-      if(sub === '/meta')    return JSON_(await (await doFetch(stub, '/meta')).json());
-      if(sub === '/history') return JSON_(await (await doFetch(stub, '/history?' + url.searchParams.toString())).json());
+      if(sub === '/meta')    return proxyDO('/meta');
+      if(sub === '/history') return proxyDO('/history?' + url.searchParams.toString());
       if(sub === '/export'){
         const r = await doFetch(stub, '/export?' + url.searchParams.toString());
-        return new Response(r.body, {headers:r.headers});
+        /* ★ 状态也带上：导出是下载流，但 DO 侧 401 / 500 时回的是 JSON 错误体，
+         *   伪装成 200 会让浏览器把一个 error.json 当成正常战报。 */
+        return new Response(r.body, {status:r.status, statusText:r.statusText, headers:r.headers});
       }
       /* ★ 导入：必须把**整个 body 原文**转过去。
        *   战报文本可能很长（几百条消息），在网关解一次再重新序列化既浪费又可能改坏内容；
        *   而且只在 POST 时转发 —— 没有 body 的 GET 会得到 400，不必让 DO 白跑一趟。 */
       if(sub === '/import' && request.method === 'POST'){
         /* ★ token 在**查询串**里，必须一起转发：只转 body 的话 DO 侧拿不到 token →
-         *   bad_token。/export 那边是拼了 searchParams 的，这里漏了就会 401。 */
-        return JSON_(await (await doFetch(stub, '/import?' + url.searchParams.toString(),
-          {method:'POST', body:await request.text()})).json());
+         *   bad_token。/export 那边是拼了 searchParams 的，这里漏了就会 401。
+         *   ★ 前端那一跳也必须拼 token（apps/web/src/main.js onImport），两边缺一不可。 */
+        return proxyDO('/import?' + url.searchParams.toString(),
+          {method:'POST', body:await request.text()});
       }
       return JSON_({error:'bad_sub'}, 404);
     }

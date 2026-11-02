@@ -314,6 +314,66 @@ const B = await createRoom();
 
   cb.close(); cb2.close(); cc.close();
 }
+/* ------------------- J8 前置：导入鉴权 / 网关状态透传 -------------------
+ * 【2026-11-02 真机事故】导入战报显示"新增 undefined 条 / 现有 undefined 条"，
+ *   却没有任何报错，用户以为战报文件格式不兼容、要重新生成。
+ * 【真实根因（两处叠加）】
+ *   ① apps/web/src/main.js 的 onImport 请求**没拼 token**（/export 拼了）→ DO 侧
+ *      verifyToken 直接 401 {error:'bad_token'}，战报文本根本没走到解析那一步；
+ *   ② apps/worker/src/index.js 网关只透传 body、JSON_ 默认 200 → 401 被吞成 200，
+ *      前端 api() 看 r.ok=true 不抛错，把错误对象当成功回包渲染。
+ * 【为什么沙盒 34 项全绿却没抓到】下面这个 Client 的 apiImport() 一直都带了 token ——
+ *   测试替身比生产写得好。所以这一层必须**故意发一个不带 token 的请求**。 */
+console.log('\n== J8 前置. 导入鉴权与网关状态透传（真机「新增 undefined 条」根因）==');
+{
+  const R = await createRoom();
+  const j = await join(R.code, '导入测试', 'cid-import-check');
+  ok('J8 前置：join 拿到 token', !!j.token, JSON.stringify(j));
+  const oneLine = JSON.stringify({
+    seq: 1, id: '888888:1', ts: Date.now(), kind: 'chat',
+    from: '老王', actor: '老王', payload: { text: '鉴权检查' },
+  });
+
+  // ① 不带 token：必须 401，绝不能被网关吞成 200（这就是 J8 卡住的那一屏）
+  const noTok = await fetch(BASE + '/api/room/' + R.code + '/import', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text: oneLine }),
+  });
+  eq('★ 不带 token 的导入返回 401（网关不再吞状态码）', noTok.status, 401);
+  const nb = await noTok.json();
+  ok('★ 回包是明确的 bad_token，而不是成功回包', nb.error === 'bad_token', JSON.stringify(nb));
+  eq('★ 错误回包里没有 imported 字段（前端不会再渲染 undefined）', nb.imported, undefined);
+
+  // ② 带 token 但 body 坏了：DO 侧 400 同样要透传
+  const bad = await fetch(BASE + '/api/room/' + R.code + '/import?token=' + encodeURIComponent(j.token), {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: 'this-is-not-json',
+  });
+  eq('★ bad_body 也透传 400', bad.status, 400);
+  ok('★ bad_body 回包是明确的错误体', (await bad.json()).error === 'bad_body');
+
+  // ③ 正常导入：回包字段必须是数字（前端 onImport 的守卫靠这两个）
+  const good = await fetch(BASE + '/api/room/' + R.code + '/import?token=' + encodeURIComponent(j.token), {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text: oneLine }),
+  });
+  eq('★ 正常导入返回 200', good.status, 200);
+  const gb = await good.json();
+  eq('★ imported 是数字（不是 undefined）', typeof gb.imported, 'number');
+  eq('★ total 是数字（不是 undefined）', typeof gb.total, 'number');
+  eq('★ 实际导入 1 条', gb.imported, 1);
+  ok('★ 来源房间标注正确', JSON.stringify(gb.from || []).indexOf('888888') >= 0, JSON.stringify(gb.from));
+
+  // ④ 顺着用户手上那份 250 行 ndjson 的形态再导一次（同一份重复导入 → 幂等跳过）
+  const again = await fetch(BASE + '/api/room/' + R.code + '/import?token=' + encodeURIComponent(j.token), {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ text: oneLine }),
+  });
+  const ab = await again.json();
+  eq('★ 重复导入不翻倍（imported=0）', ab.imported, 0);
+  ok('★ 跳过数也是数字', typeof ab.skipped === 'number', JSON.stringify(ab));
+}
+
 ca.close();
 
 console.log('\n---------------------------');

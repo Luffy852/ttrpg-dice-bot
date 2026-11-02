@@ -620,10 +620,17 @@ console.log('== 22. ★ 战报导入：接在当前房间后面 + 按 msg_id 去
   eq('★ 坏行有记录', p3.errs.length, 1);
 
   /* ★ 网关必须把 token 一起转发：只转 body 的话 DO 侧拿不到 token → bad_token。
-   *   端到端真跑才发现（单测直接调 DO，绕开了网关这一层）。 */
+   *   端到端真跑才发现（单测直接调 DO，绕开了网关这一层）。
+   * ★ 2026-11-02 补：光"带查询串"还不够 —— 前端那一跳也得拼 token，
+   *   且网关必须**连 HTTP 状态一起透传**。原来只透 body、默认 200，
+   *   DO 的 401 {error:'bad_token'} 被前端当成成功回包渲染成"新增 undefined 条"（J8 真机事故）。
+   *   断言改成验行为（query 进了 doFetch + 状态被透传），不再绑死具体函数名。 */
   const idxSrc = fs.readFileSync(path.join(ROOT, 'apps', 'worker', 'src', 'index.js'), 'utf8');
   ok('★ 网关转发 /import 时带上查询串（token 在里面）',
-    /doFetch\(stub, '\/import\?' \+ url\.searchParams\.toString\(\)/.test(idxSrc), 'index.js');
+    /'\/import\?' \+ url\.searchParams\.toString\(\)/.test(idxSrc) &&
+    /const proxyDO = async \(path, init\)[\s\S]{0,200}doFetch\(stub, path, init\)/.test(idxSrc), 'index.js');
+  ok('★ 网关透传 DO 的 HTTP 状态（401 不再被吞成 200）',
+    /JSON_\(await r\.json\(\), r\.status\)/.test(idxSrc), 'index.js');
   ok('★ 网关的房间路由认得 /import', /\/import/.test(idxSrc) && /\/export/.test(idxSrc), 'index.js');
   ok('★ /import 只接受 POST（没有 body 的 GET 不该白跑一趟）',
     /sub === '\/import' && request\.method === 'POST'/.test(idxSrc));

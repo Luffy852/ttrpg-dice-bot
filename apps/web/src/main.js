@@ -106,7 +106,17 @@ function enter(r){
         '· 已存在的消息自动跳过，可重复导入')) return;
       ui.note('正在导入…');
       try{
-        const r = await api('/api/room/' + room.code + '/import', {text});
+        /* ★ token 必须拼在查询串里（与 /export 一致）—— DO 侧 /import 第一件事就是
+         *   verifyToken(url.searchParams.get('token'))。原来这里漏了，
+         *   请求在鉴权层就被拒成 {error:'bad_token'}，而网关又把 401 吞成 200，
+         *   前端便把错误对象当成成功回包渲染 → "新增 undefined 条 / 现有 undefined 条"
+         *   （J8 真机卡住的那一屏）。战报文本根本没走到解析那一步。 */
+        const r = await api('/api/room/' + room.code + '/import?token=' +
+          encodeURIComponent(room.token), {text});
+        /* ★ 兜底守卫：成功回包必须有这两个数字。任何"错误被伪装成成功"的漏网字段
+         *   都会在这里变成明确的「导入失败：…」，而不是渲染出「新增 undefined 条」。 */
+        if(typeof r.imported !== 'number' || typeof r.total !== 'number')
+          throw new Error(r.error || r.note || '服务端回包不完整（缺 imported / total）');
         let msg = '导入完成：新增 <b>' + r.imported + '</b> 条' +
           (r.skipped ? ('，跳过已存在的 ' + r.skipped + ' 条') : '') +
           (r.errors && r.errors.length ? ('，<b>' + r.errors.length + ' 行无法解析</b>') : '') +
