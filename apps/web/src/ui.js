@@ -244,6 +244,47 @@ export function createUI({code, onSubmit, onExport, onImport}){
     });
   }
 
+  /* ---------- 选择弹窗（★ 「取消」必须是取消，不是一个选项） ----------
+   * 【为什么不用 confirm】confirm 只有「确定 / 取消」两个出口。上一版把「取消」
+   *   当成"导出 NDJSON"来用 —— 于是用户点取消，实际上下载了一份文件。
+   *   这不是"少了个选项"，是**取消按钮说了假话**：它执行的不是它写的那个动作。
+   * 【三条硬规矩】① 选项按钮各自执行自己的动作 ② 取消/点遮罩/Esc 一律 = 什么都不做
+   *   ③ 同一时刻只允许一个弹窗（连点两次导出时不会叠两层）。
+   * @returns {Promise<string|null>} 选中项的 value；null = 用户取消了 */
+  function askChoice({title, sub, options, cancel}){
+    return new Promise(resolve => {
+      const prev = document.querySelector('.mask');
+      if(prev) prev.remove();                      // ★ 不叠层：连点两次只留最新那个
+      const $ = document.createElement.bind(document);
+      const mask = document.createElement('div');
+      mask.className = 'mask';
+      mask.innerHTML = '<div class="mcard">' +
+        (title ? '<div class="mt">' + Engine.esc(title) + '</div>' : '') +
+        (sub ? '<div class="ms">' + sub + '</div>' : '') +     // sub 允许调用方给 <b>（已在 ask.js 内写好）
+        '<div class="mbtns"></div></div>';
+      const box = mask.querySelector('.mbtns');
+      (options || []).forEach(o => {
+        const b = document.createElement('button');
+        b.className = 'mbtn';
+        b.innerHTML = '<b>' + Engine.esc(o.label) + '</b>' +
+          (o.desc ? '<span>' + Engine.esc(o.desc) + '</span>' : '');
+        b.addEventListener('click', () => { close(); resolve(o.value); });
+        box.appendChild(b);
+      });
+      const c = document.createElement('button');
+      c.className = 'mbtn cancel';
+      c.textContent = cancel || '取消';
+      c.addEventListener('click', () => { close(); resolve(null); });
+      box.appendChild(c);
+      /* ★ 点遮罩空白处 = 取消：手机上最容易点到的就是遮罩，它必须与"取消"同义 */
+      mask.addEventListener('click', e => { if(e.target === mask){ close(); resolve(null); } });
+      function onKey(e){ if(e.key === 'Escape'){ close(); resolve(null); } }
+      document.addEventListener('keydown', onKey);
+      function close(){ mask.remove(); document.removeEventListener('keydown', onKey); }
+      document.body.appendChild(mask);
+    });
+  }
+
   /* ---------- 键盘适配（M2 真机验证三件套，原样搬） ---------- */
   const vv = window.visualViewport;
   function fit(){
@@ -262,7 +303,7 @@ export function createUI({code, onSubmit, onExport, onImport}){
 
   return {
     append, prepend, appendPending, failPending, failAll, refreshTop, toBottom,
-    setPaging, doneLoadingOlder, onLoadOlder, reset,
+    setPaging, doneLoadingOlder, onLoadOlder, reset, askChoice,
     setRoom(r){
       if(r.rule) st.rule = r.rule;
       if(r.baredice != null) st.baredice = !!r.baredice;

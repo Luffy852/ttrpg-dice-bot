@@ -11,6 +11,7 @@ const COC_SKILLS = [
   {key:'心理学', aliases:['心理学','psychology','读心','察言观色']},
   {key:'说服',   aliases:['说服','劝说','交涉','persuade','persuasion']},
   {key:'威吓',   aliases:['威吓','恐吓','威胁','intimidate','intimidation']},
+  {key:'体型',   aliases:['体型','体形','siz','size']},
   {key:'潜行',   aliases:['潜行','躲藏','隐藏','隐匿','stealth','sneak']},
   {key:'急救',   aliases:['急救','急救术','firstaid','first aid','医疗']},
   {key:'医学',   aliases:['医学','医术','医生','medicine','med']},
@@ -39,13 +40,63 @@ const COC_SKILLS = [
   {key:'教育',   aliases:['教育','学历','edu','education']},
   {key:'智力',   aliases:['智力','int','intelligence']},
   {key:'san',   aliases:['理智','理智值','san','sanity']},
-  {key:'hp',    aliases:['体力值','生命','生命值','hp','hitpoints','hit points']}
+  {key:'hp',    aliases:['体力值','生命','生命值','hp','hitpoints','hit points']},
+  {key:'mp',    aliases:['魔法值','魔法','魔力','mp','magicpoints','magic points','magic']}
 ];
 // 同一个名字在两个域都要能查：.rc 用它检定、.st set 用它写卡 —— 一张表注册两次，不手写第二份数据
 registerAliases(CHECK_DOMAIN.coc7, COC_SKILLS.map(s => ({key:s.key, kind:'cocskill', zh:s.key, display:s.key, aliases:s.aliases})));
 registerAliases(CARD_DOMAIN.coc7,  COC_SKILLS.map(s => ({key:s.key, display:s.key, aliases:s.aliases})));
-// hp / san 是备忘字段（只显示，骰娘不自动增减），其余为可检定技能
-const COC_MEMO = new Set(['hp','san']);
+// hp / san / mp 是备忘字段（只显示，骰娘不自动增减），其余为可检定技能
+const COC_MEMO = new Set(['hp','san','mp']);
+
+/* ★ COC 的**属性**（9 项）—— 与技能是两类东西，卡上要分开摆（2026-11-01 真机疏漏）
+ * 【原来的洞】COC 卡只有技能，八大属性（力量 / 体质 / 体型 / 敏捷 / 外貌 / 智力 / 意志 / 教育）
+ *   被当成普通技能混在技能格里，连**体型 SIZ 都没注册**（写 `.st set 体型 60` 会落成一个自定义技能）。
+ *   而 COC 的派生值（HP / MP / SAN 初始 / DB / 体格）**全部由属性推导** —— 属性缺失，派生值就等于不存在。
+ * 【为什么不另建一张卡】属性与技能**都按百分比存（1–99）**，值域一致、检定时也走同一条链
+ *   （`.rc 力量` 与 `.rc 侦查` 都是 1d100 ≤ 数值）。差别只在**卡面分类与派生**，
+ *   所以这里只加一个"哪些 key 是属性"的集合，不动存储、不动 parseCard 的值域。
+ * 【幸运为什么在里面】7 版把幸运列为第二属性（3d6×5），与八大属性同形态、也常被检定，
+ *   放属性区比混在技能里更符合卡面习惯。 */
+const COC_ATTRS = ['力量','体质','体型','敏捷','外貌','智力','意志','教育','幸运'];
+const COC_ATTR_SET = new Set(COC_ATTRS);
+/** 属性英文缩写 → 规范 key（用于卡面与派生提示里显示 STR / SIZ 这类缩写） */
+const COC_ATTR_ABBR = {力量:'STR', 体质:'CON', 体型:'SIZ', 敏捷:'DEX', 外貌:'APP',
+  智力:'INT', 意志:'POW', 教育:'EDU', 幸运:'LUC'};
+
+/* ★ 伤害加值 DB 与体格 Build：STR + SIZ 查表（7 版规则书 · 快速开始规则同表）
+ *   调查员的 STR / SIZ 各 ≤ 90（3d6×5 / (2d6+6)×5），两者相加最大 180 —— 落在最后一档内，
+ *   下面 5 档已覆盖全部正常取值；>204 的兜底只是防御性代码，正常玩不到。
+ * ★ MOV（移动速度）不做：规则书有"DEX 与 STR 同低于 / 高于 SIZ 时 ±1"的细则，
+ *   这次没拿到可引用的规则原文，宁可不做也不给一个记错的数。 */
+const DB_BUILD = [
+  {max:64,  db:'-2',   build:-2},
+  {max:84,  db:'-1',   build:-1},
+  {max:124, db:'0',    build:0},
+  {max:164, db:'+1d4', build:1},
+  {max:204, db:'+1d6', build:2},
+];
+function dbBuildOf(sum){
+  for(const r of DB_BUILD) if(sum <= r.max) return r;
+  return DB_BUILD[DB_BUILD.length - 1];
+}
+
+/** ★ 派生值：全部由属性现场推导，**不存进卡**（原则 6 —— 存副本迟早漂移）
+ * 【为什么不写进 data】用户手填的 hp / san 是"当前值"，派生的 hp / san 是"上限 / 初始值"，
+ *   两者语义不同且都会变。存一份进去就会变成"哪份是真的"的无解问题。
+ * 【返回哪些】只返回**当前能算出来的**（缺属性就不给那一项），避免拿半个属性算出一个假数。 */
+function cocDerived(data){
+  const d = data || {}, has = k => typeof d[k] === 'number';
+  const out = {};
+  if(has('体质') && has('体型')) out.hp = Math.floor((d['体质'] + d['体型']) / 10);
+  if(has('意志')){ out.mp = Math.floor(d['意志'] / 5); out.san0 = d['意志']; }
+  if(has('力量') && has('体型')){
+    const r = dbBuildOf(d['力量'] + d['体型']);
+    out.db = r.db; out.build = r.build;
+  }
+  out.complete = (out.hp != null && out.mp != null && out.db != null);
+  return out;
+}
 
 /* 百分骰 rollPercent() —— COC 包里唯一需要新写的掷骰逻辑（v1.2 §6.2）
  * 机制：十位骰若干 + 共用个位骰。奖励骰取十位**最低**、惩罚骰取十位**最高**。
@@ -93,4 +144,5 @@ function lookupCocSkill(name, card){
  * Hope/Fear 判定**只看两颗 d12**，优劣势加减的 d6 不参与比较（v1.2 §7.2）。
  */
 
-export { COC_SKILLS, COC_MEMO, rollPercent, judgeCoc, lookupCocSkill };
+/* ★ 导出必须单行：tools/load-engine.js 剥 import 靠正则，多行 `export {` 会漏掉后半截（拼接路直接语法错误） */
+export { COC_SKILLS, COC_MEMO, COC_ATTRS, COC_ATTR_SET, COC_ATTR_ABBR, cocDerived, dbBuildOf, rollPercent, judgeCoc, lookupCocSkill };

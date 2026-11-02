@@ -52,11 +52,12 @@ function loadEngine(){
   'isCommandText, defsHtml, renderDefs, renderCardHtml, renderHtml, critOf, ' +
   'ALIAS, detectConflicts, suggestAlias, lookupCheckTarget, normalizeCardKey, natMarkOf, NAT_MARK, ' +
   'hasNatSemantics, cardRuleName, cardMismatchNote, rulePack, RULE_PACKS, lookupAlias, ' +
-  'IMPLEMENTED, RULE_META, RULE_TOKEN, ruleToken, LIMITS, HELP_BODY, helpTop, ' +
+  'IMPLEMENTED, RULE_META, RULE_TOKEN, ruleToken, LIMITS, HELP_BODY, helpTop, helpCoc, helpDnd, helpFu, ' +
   'hhmm, ymd, ' +
   'rollPercent, judgeCoc, judgeDh, judgeFu, parseTier, lookupCocSkill, FAMILY_PACKS, ' +
   'packOfFamily, verbOwner, CHECK_DOMAIN, CARD_DOMAIN, checkDomainOf, cardDomainOf, ' +
-  'COC_SKILLS, COC_MEMO, DH_TRAITS, FU_ATTRS, FU_TIERS, ' +
+  'COC_SKILLS, COC_MEMO, COC_ATTRS, COC_ATTR_SET, COC_ATTR_ABBR, cocDerived, dbBuildOf, ' +
+  'DH_TRAITS, FU_ATTRS, FU_TIERS, ' +
   'GENERIC_PACK, DND_PACK, COC_PACK, DH_PACK, FU_PACK, renderMsg, fmtMod, sumArr, ' +
   'FU_MEMO, FU_MEMO_KEYS, takeOverR:null};')();
   // ★ 源码级断言（§10/§14/§22）扫的就是这段：架构类断言扫引擎源码，呈现类（CSS）扫 legacy HTML

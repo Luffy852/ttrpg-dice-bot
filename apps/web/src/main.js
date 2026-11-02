@@ -10,6 +10,7 @@
 import {createNet} from './net.js';
 import {applyBatch} from './batch.js';
 import {createUI} from './ui.js';
+import {pickExportFormat} from './ask.js';
 
 const $ = id => document.getElementById(id);
 const store = {
@@ -79,11 +80,16 @@ function enter(r){
       ui.appendPending(reqId, text);
     },
     /* ★ 导出两种格式：md 给人看，ndjson 才能**导回来** ——
-   *   而战报文件头那句"NDJSON 版可原样回灌"以前是空话：根本没有导入功能。 */
-    onExport(){
-      const want = confirm('导出 Markdown 战报（人读）。\n\n点「取消」则导出 NDJSON（机器格式，可导入回灌）');
+   *   而战报文件头那句"NDJSON 版可原样回灌"以前是空话：根本没有导入功能。
+   * 【★ 为什么换成弹窗】confirm 只有「确定 / 取消」两个出口，上一版把「取消」
+   *   当成"导出 NDJSON"用 —— 用户点取消，实际上下载了一份文件。
+   *   **弹窗里的取消必须是取消**，所以改成三按钮（两个格式 + 一个取消）。
+   *   选择与取消的文案在 ask.js（生产与冒烟跑同一份，不从这里另写一遍）。 */
+    async onExport(){
+      const pick = await pickExportFormat(ui);
+      if(!pick) return;                    // ★ 取消 = 什么都不做，不再偷偷导出一份
       location.href = '/api/room/' + room.code + '/export?format=' +
-        (want ? 'md' : 'ndjson') + '&token=' + encodeURIComponent(room.token);
+        pick + '&token=' + encodeURIComponent(room.token);
     },
     /* ★ 导入战报（真机反馈 · 第 8 条）：把 NDJSON 灌回**当前房间**
      *  【为什么要先问一句】导入会往房间里写消息，且不可撤销 —— 手滑选错文件就污染了房间。

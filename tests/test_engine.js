@@ -881,8 +881,25 @@ console.log('== 17. COC 7th（百分骰 / 奖惩骰 / 五级成功等级 / 开�
   // ⑥ .rc list：有卡列卡上的、无卡说明开放列表
   {
     const h = runCmd('.rc list', mkCtx('coc7', CARD))[0];
-    ok('★ 有卡时列出卡上的技能', /你卡上的技能/.test(h.html));
+    /* ★ 2026-11-01 改口径：原来只列"技能"，属性被混在技能格里（连体型 SIZ 都没注册）。
+     *   现在分「属性 / 技能」两栏 —— 属性是派生值（HP / MP / SAN / DB）的唯一来源，必须看得见。 */
+    ok('★ 有卡时列出卡上的属性与技能', /你卡上的属性与技能/.test(h.html), stripHtml(h.html).slice(0, 60));
     ok('且给出 .rc 用法', /\.rc 侦查/.test(h.html));
+    /* ★ 原 CARD 只有技能 —— 正好用来验"没填属性时要提醒"，而不是假装分栏存在 */
+    ok('★ 卡上没有属性时提醒补齐（派生值算不出来）', /还差属性|还没有.*属性/.test(h.html), stripHtml(h.html).slice(0, 90));
+    const CARD_ATTR = {family:'coc7', data:{力量:60, 体质:50, 体型:60, 敏捷:55, 意志:70, 侦查:60}};
+    const h3 = runCmd('.rc list', mkCtx('coc7', CARD_ATTR))[0];
+    ok('★ 有属性时属性独占一栏（不混进技能格）',
+      /属性 · 5 项/.test(h3.html) && /技能 · 1 项/.test(h3.html), stripHtml(h3.html).slice(0, 90));
+    ok('★ 属性栏点明它决定哪些派生值', /HP 要用它|SAN 初始|DB 与体格/.test(h3.html), stripHtml(h3.html).slice(0, 120));
+    /* ★ 上面验的是 .rc list（另一处出口）。卡面 renderCard 必须**单独**验一次行为：
+     *   断言"技能格里没有属性" —— 只断言"有属性栏"的话，属性混进技能格照样绿
+     *   （变异测试正是这么把我漏掉的：它只改了 renderCard 的过滤，listChecks 那条不受影响）。 */
+    const CARD_MIX = {family:'coc7', data:{力量:60, 体型:60, 侦查:60, 图书馆:50}};
+    const cells = (Engine.COC_PACK.renderCard(CARD_MIX).match(/<div class="cell">[\s\S]*?<\/div>/g) || []).join('');
+    ok('★ 技能格里只有技能、不含属性（renderCard 行为断言）',
+      /侦查/.test(cells) && /图书馆/.test(cells) && !/力量/.test(cells) && !/体型/.test(cells),
+      stripHtml(cells).slice(0, 80));
     const h2 = runCmd('.rc list', mkCtx('coc7', null))[0];
     ok('无卡时说明技能表是开放的', /开放/.test(h2.html));
   }
@@ -1265,7 +1282,10 @@ console.log('== 23. 真机反馈第四轮（M2 Chrome 实机 7 条）★ 本轮 
   // ② FU 调整值位（用户反馈"只保留文本、没有位置"→ 判定后补上位置）
   {
     const C = {family:'fu', data:{dex:8, ins:10, mig:8, wlp:6}};
-    const m = lastMsg(runCmd('.fu dex ins 13 +2', mkCtx('fu', C)));
+    /* ★ 必须注入骰点：用真实随机时，掷出双 1 会走"失手"分支（why 是失手文案，没有"合计 vs 难度"），
+     *   断言就**偶发**转红 —— 十次里大约一次。这种断言比没有更糟：它平时绿，红了又复现不了。
+     *   注入 3 / 5（非同点、非双 1）保证每次都走普通判定分支。 */
+    const m = lastMsg(dice([3, 5], () => runCmd('.fu dex ins 13 +2', mkCtx('fu', C))));
     eq('★ FU 调整值进 comps', m.view.comps.length, 1);
     eq('★ FU 调整值 = +2', m.view.comps[0].v, 2);
     ok('★ FU total = 骰点 + 调整值', m.view.total === m.view.diceSum + 2, 'total=' + m.view.total);
@@ -1466,6 +1486,124 @@ console.log('== 24. 真机反馈第五轮（M3 手机端 · 3 条）★ 本轮 =
     const c2 = mkCtx('generic');
     const sys2 = runCmd('.set rule coc', c2).find(m => m.kind === 'sys');
     ok('★ 未注入 nowMs 时退回当前时间（不崩）', /^\d{2}:\d{2}$/.test(c2.room.ruleSetAt), String(c2.room.ruleSetAt));
+  }
+}
+
+console.log('== 25. COC 卡缺属性（2026-11-01 真机疏漏 · 属性与派生值）★ 本轮 ==');
+{
+  const strip25 = s => String(s == null ? '' : s).replace(/<[^>]+>/g, '');
+  const PACK = Engine.COC_PACK;
+  const ATTRS = Engine.COC_ATTRS;
+
+  // ① 八大属性 + 幸运必须都在别名表里（★ 原来连"体型"都没注册，写它会落成自定义技能）
+  {
+    const want = ['力量','体质','体型','敏捷','外貌','智力','意志','教育','幸运'];
+    eq('★ COC 属性共 9 项', ATTRS.length, 9);
+    ok('★ 八大属性 + 幸运齐全（含原先缺失的体型）',
+      want.every(k => ATTRS.indexOf(k) >= 0), ATTRS.join('/'));
+    /* ★ 光断言"写进卡了"是不够的：未注册的键也会原样进卡（开放列表），那条断言照样绿。
+     *   真正要锁的是"它被**认作属性**" —— 所以查卡域别名表，而不是只查 data。 */
+    want.forEach(k => {
+      const e = Engine.lookupAlias(Engine.CARD_DOMAIN.coc7, k);
+      ok('★ 属性「' + k + '」注册在卡域别名表（不会落成自定义技能键）',
+        !!e && e.key === k, JSON.stringify(e));
+    });
+    // 每个属性都要能真的写进卡，且**被识别为属性**而不是落成一个新技能
+    want.forEach(k => {
+      const c = bindCard('.st set ' + k + ' 60', 'coc7');
+      ok('★ .st set ' + k + ' 60 写进卡且被认作属性',
+        !!c && c.family === 'coc7' && c.data[k] === 60, JSON.stringify(c && c.data));
+    });
+    // 英文缩写同样要认（siz 是这次新补的）
+    Object.entries({str:'力量', con:'体质', siz:'体型', dex:'敏捷',
+      app:'外貌', int:'智力', pow:'意志', edu:'教育', luck:'幸运'}).forEach(([en, zh]) => {
+      const c = bindCard('.st set ' + en + ' 55', 'coc7');
+      ok('★ 英文缩写 .st set ' + en + ' 55 → ' + zh, !!c && c.data[zh] === 55, JSON.stringify(c && c.data));
+    });
+  }
+
+  // ② 属性与技能在卡面上要分家（原来混在同一片格子里）
+  {
+    const c = {family:'coc7', data:{力量:60, 体质:50, 体型:60, 敏捷:55, 外貌:60,
+      智力:75, 意志:70, 教育:70, 幸运:65, 侦查:60, 图书馆:50, hp:11, san:70}};
+    const h = PACK.renderCard(c);
+    ok('★ 卡面有独立的属性行', /属性/.test(h) && /力量/.test(h) && /体型/.test(h), strip25(h).slice(0, 80));
+    ok('★ 属性按固定顺序排（力量 体质 体型 …）',
+      strip25(h).indexOf('力量') < strip25(h).indexOf('体质') &&
+      strip25(h).indexOf('体质') < strip25(h).indexOf('体型'), strip25(h).slice(0, 60));
+    ok('★ 技能仍在格子里（属性不占技能格）', /class="cell"/.test(h) && /侦查/.test(h));
+    ok('★ 备忘值（HP / SAN）另起一行', /HP 11/.test(strip25(h)) && /当前值/.test(strip25(h)), strip25(h).slice(-120));
+  }
+
+  // ③ ★ 派生值：由属性现场推导，不存进卡
+  {
+    const d = Engine.cocDerived({体质:50, 体型:60, 意志:70, 力量:60});
+    eq('★ HP = (体质+体型)/10', d.hp, 11);
+    eq('★ MP = 意志/5', d.mp, 14);
+    eq('★ SAN 初始 = 意志', d.san0, 70);
+    eq('★ DB：力量+体型=110 → 0', d.db, '0');
+    eq('★ 体格：力量+体型=110 → 0', d.build, 0);
+    // DB / 体格查表的五档都要对（7 版规则书同表）
+    const cases = [[64,'-2',-2], [84,'-1',-1], [124,'0',0], [164,'+1d4',1], [204,'+1d6',2]];
+    cases.forEach(([sum, db, build]) => {
+      const r = Engine.dbBuildOf(sum);
+      ok('★ STR+SIZ=' + sum + ' → DB ' + db + ' / 体格 ' + build, r.db === db && r.build === build,
+        'got ' + r.db + ' / ' + r.build);
+    });
+    // 缺属性就少给一项 —— 不拿半个属性凑一个假数
+    const d2 = Engine.cocDerived({力量:60});
+    eq('★ 缺体质/体型时 HP 不给', d2.hp, undefined);
+    eq('★ 缺意志时 MP 不给', d2.mp, undefined);
+    eq('★ 缺力量/体型时 DB 不给', d2.db, undefined);
+    // ★ 派生值不写进卡（原则 6：存副本迟早漂移）
+    const c = bindCard('.st set 力量 60 体质 50 体型 60 意志 70', 'coc7');
+    ok('★ 派生值不进卡数据（只在渲染时推导）',
+      Object.keys(c.data).every(k => k !== 'hp' && k !== 'mp' && k !== 'db'), JSON.stringify(c.data));
+    ok('★ 卡面显示派生行', /派生/.test(PACK.renderCard(c)), strip25(PACK.renderCard(c)).slice(-90));
+  }
+
+  // ④ 属性与技能检定同链：都是 1d100 ≤ 数值
+  {
+    const c = {family:'coc7', data:{力量:60, 侦查:60}};
+    const r = dice([3, 4], () => runCmd('.rc 力量', mkCtx('coc7', c)));
+    const m = lastMsg(r);
+    ok('★ .rc 力量 能掷（属性走同一条检定链）', m.kind === 'roll' && m.view.dc === 60, m.kind);
+    const r2 = dice([3, 4], () => runCmd('.rc 体型', mkCtx('coc7', {family:'coc7', data:{体型:70}})));
+    ok('★ .rc 体型 能掷（原先是未注册的自定义技能）', lastMsg(r2).kind === 'roll', lastMsg(r2).kind);
+  }
+
+  // ⑤ 相关出口都要跟着改（★ 这是最典型的"横切决策只落实一处"：改了 .st 忘改 .help / .rc list / 提示）
+  {
+    const tp = PACK.cardTemplate();
+    const tpTxt = JSON.stringify(tp);
+    ok('★ 卡模板给了属性示例', /力量 60 体质 50 体型 60/.test(tpTxt), strip25(tpTxt).slice(0, 80));
+    ok('★ 卡模板说明 HP/MP/SAN 是派生值', /派生值/.test(tpTxt));
+    ok('★ 卡模板说明 7 版没有灵感属性', /灵感/.test(tpTxt) && /智力/.test(tpTxt));
+
+    const nc = PACK.noCardNote();
+    ok('★ 无卡提示给的是属性 + 技能两条（不再只给技能）', /力量 60/.test(nc) && /侦查 60/.test(nc), strip25(nc).slice(0, 90));
+
+    const hint = PACK.checkHint();
+    ok('★ checkHint 说明属性也能检定', /rc 力量/.test(hint), strip25(hint).slice(0, 80));
+
+    const help = Engine.helpCoc ? Engine.helpCoc() : null;
+    if(help){
+      const hs = JSON.stringify(help);
+      ok('★ .help coc 有属性段', /八大属性/.test(hs), strip25(hs).slice(0, 60));
+      ok('★ .help coc 有派生值段', /派生值/.test(hs) && /DB/.test(hs));
+      ok('★ .help coc 说明灵感 = 智力检定', /灵感/.test(hs) && /智力检定/.test(hs));
+    }
+    const list = PACK.listChecks('coc7', null);
+    ok('★ 无卡时 .rc list 讲清属性 vs 技能', /属性/.test(JSON.stringify(list)) && /技能/.test(JSON.stringify(list)));
+  }
+
+  // ⑥ 健全性：新增的别名不能与既有键冲突（别名层有冲突自检，装了不算数，要真的跑起来）
+  {
+    eq('★ 别名域仍是零冲突（新增属性没撞车）', Engine.ALIAS.conflicts.length, 0);
+    ok('★ 四族别名域互不相同', new Set(Object.values(Engine.CHECK_DOMAIN)).size === 4);
+    // ★ "体型"不能与"体格"混：体格是派生值，不是可写字段
+    const c = bindCard('.st set 体格 1', 'coc7');
+    ok('★ 写「体格」不会被当成属性（它是派生值）', !c.data['体型'], JSON.stringify(c.data));
   }
 }
 

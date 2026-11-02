@@ -2,7 +2,7 @@
  * 从 M2 的 ENGINE 区整体搬来，逻辑一行未改（由 676 项断言锁定）。
  */
 import { lookupAlias, normToken, suggestAlias } from './alias.js';
-import { COC_MEMO, judgeCoc, lookupCocSkill, rollPercent } from './coc.js';
+import { COC_MEMO, COC_ATTRS, COC_ATTR_SET, cocDerived, judgeCoc, lookupCocSkill, rollPercent } from './coc.js';
 import { CARD_DOMAIN, checkDomainOf } from './domains.js';
 import { esc } from './util.js';
 import { buildTotal } from './view.js';
@@ -11,22 +11,29 @@ const COC_PACK = {
   family:'coc7',
   supportsCheck:true,
   needsCard:true,
-  checkHint(){ return '用法：<b>.rc 侦查</b>　·　<b>.rc 侦查 +1</b>（1 奖励骰）　·　<b>.rc 侦查 -2</b>（2 惩罚骰）　·　<b>.rc list</b> 看卡上技能'; },
+  checkHint(){ return '用法：<b>.rc 侦查</b>（技能）　·　<b>.rc 力量</b>（属性，同规则）　·　<b>.rc 侦查 +1</b>（1 奖励骰）　·　<b>.rc list</b> 看卡上的属性与技能'; },
   checkOffNote(){ return null; },
   noCardNote(){
-    return '尚未绑定角色卡 —— 先用 <b>.st set 侦查 60 图书馆 50 心理学 40</b> 绑定（技能名 + 数值，任意增减），' +
-           '再 <b>.rc 侦查</b>；或直接用 <b>.r 1d100</b> 裸掷。';
+    return '尚未绑定角色卡 —— 先用 <b>.st set 力量 60 体质 50 体型 60 敏捷 55 智力 75 意志 70</b> 填属性，' +
+           '再 <b>.st set 侦查 60 图书馆 50</b> 补技能（都是"名字 + 数值"，任意增减），' +
+           '然后 <b>.rc 侦查</b>；或直接用 <b>.r 1d100</b> 裸掷。';
   },
   cardTemplate(){
     return {title:'尚未绑定角色卡', sections:[
-      {h:'复制下面这行、改成自己的技能后发送即可', rows:[
-        {k:'.st set 侦查 60 图书馆 50 心理学 40 hp 12 san 70', v:'格式：技能名 数值，空格分隔，可任意增减技能'}
+      {h:'① 属性（八大项 + 幸运，都填百分比）', rows:[
+        {k:'.st set 力量 60 体质 50 体型 60 敏捷 55 外貌 60 智力 75 意志 70 教育 70', v:'力量 体质 体型 敏捷 外貌 智力 意志 教育（英文 str / con / siz / dex / app / int / pow / edu 同样认）'},
+        {k:'.st set 幸运 65', v:'幸运也常单独给（可写 luck）'}
       ]},
-      {h:'这张卡的两条规则', rows:[
-        {k:'技能表是开放的', v:'想加什么就写什么：<b>.st set 开锁 30 手枪 45</b> —— 不在常用表里的名字也照收，原样进卡'},
-        {k:'hp / san 是备忘', v:'只作显示，骰娘<b>不会自动增减</b>；变化请自己 <b>.st set san 65</b> 改'}
+      {h:'② 技能（开放列表，想加什么写什么）', rows:[
+        {k:'.st set 侦查 60 图书馆 50 心理学 40', v:'技能名 数值，空格分隔，可任意增减'},
+        {k:'.st set 开锁 30 手枪 45', v:'不在常用表里的名字也照收，原样进卡'}
+      ]},
+      {h:'这张卡的三条规则', rows:[
+        {k:'属性与技能都按百分比', v:'两者都是 1–99，都能直接 <b>.rc 名字</b> 检定（1d100 ≤ 数值）'},
+        {k:'HP / MP / SAN 等是派生值', v:'由属性自动推导并显示在卡下方；手填的 <b>hp / san / mp</b> 是"当前值"，骰娘<b>不会自动增减</b>'},
+        {k:'7 版没有"灵感"这一项', v:'灵感检定 = 智力检定（掷骰 ≤ 智力值）；卡上的"灵感"只是你自定义的一个技能名'}
       ]}
-    ], foot:['★ COC 检定 = 掷 1d100 ≤ 技能值；奖惩骰见 <b>.help coc</b>']};
+    ], foot:['★ COC 检定 = 掷 1d100 ≤ 数值；奖惩骰见 <b>.help coc</b>']};
   },
   parseCard(rest){
     const t = rest.trim().split(/\s+/).filter(Boolean);
@@ -44,43 +51,86 @@ const COC_PACK = {
     }
     return {data, errs, count:Object.keys(data).length};
   },
+  /* ★ 卡面四段：属性 / 技能 / 备忘（当前值）/ 派生（由属性算出的上限与初始值）
+   * 【为什么属性要单独一段】它们与技能**同值域、同检定链**（都是 1d100 ≤ 数值），
+   *   但语义完全不同：技能是"练过的"，属性是"这个人本身"，且派生值只认属性。
+   *   混在一个格子列表里，用户既看不出自己属性齐不齐，也无从核对 HP 是怎么来的。
+   * 【为什么不把派生值写进卡】原则 6 —— 存副本迟早与属性漂移。这里每次现场推导。 */
   renderCard(card){
-    const keys = Object.keys(card.data).filter(k => !COC_MEMO.has(k));
-    const memo = Object.keys(card.data).filter(k => COC_MEMO.has(k));
-    const cells = keys.slice(0, 24).map(k =>
-      '<div class="cell"><span class="ck">' + esc(k) + '</span> <span class="cv">' + card.data[k] + '</span></div>').join('');
-    const memoHtml = memo.length
-      ? '<div class="stline" style="margin-top:6px">' + memo.map(k => esc(k.toUpperCase()) + ' ' + card.data[k]).join('　·　') +
-        '　<span class="ck">（备忘值，骰娘不自动增减）</span></div>'
+    const data = card.data || {};
+    const attrs = COC_ATTRS.filter(k => typeof data[k] === 'number');
+    const skills = Object.keys(data).filter(k => !COC_ATTR_SET.has(k) && !COC_MEMO.has(k));
+    const memo = Object.keys(data).filter(k => COC_MEMO.has(k));
+
+    const attrHtml = attrs.length
+      ? '<div class="stline"><span class="ck">属性</span> ' + attrs.map(k =>
+          esc(k) + ' <b>' + data[k] + '</b>').join('　·　') + '</div>'
       : '';
-    return (cells ? '<div class="card">' + cells + '</div>' : '<div class="stline">（卡上还没有技能）</div>') +
-      memoHtml + (keys.length > 24 ? '<div class="stline">… 共 ' + keys.length + ' 项</div>' : '');
+    const cells = skills.slice(0, 24).map(k =>
+      '<div class="cell"><span class="ck">' + esc(k) + '</span> <span class="cv">' + data[k] + '</span></div>').join('');
+    const skillHtml = cells
+      ? '<div class="card">' + cells + '</div>'
+      : '<div class="stline">（卡上还没有技能）</div>';
+    const memoHtml = memo.length
+      ? '<div class="stline" style="margin-top:6px">' + memo.map(k => esc(k.toUpperCase()) + ' ' + data[k]).join('　·　') +
+        '　<span class="ck">（当前值 · 备忘，骰娘不自动增减）</span></div>'
+      : '';
+    /* ★ 派生行：只列**当前算得出来**的，缺哪个属性就少哪一项 ——
+     *   与其拿半个属性算出一个假数，不如明确"你还差什么"。 */
+    const dv = cocDerived(data);
+    const parts = [];
+    if(dv.hp != null) parts.push('HP ' + dv.hp + '（=(体质+体型)/10）');
+    if(dv.mp != null) parts.push('MP ' + dv.mp + '（=意志/5）');
+    if(dv.san0 != null) parts.push('SAN 初始 ' + dv.san0 + '（=意志）');
+    if(dv.db != null) parts.push('DB ' + dv.db + '　体格 ' + (dv.build > 0 ? '+' : '') + dv.build + '（=力量+体型查表）');
+    const derivedHtml = parts.length
+      ? '<div class="stline" style="margin-top:6px"><span class="ck">派生</span> ' + parts.join('　·　') +
+        '<br><span class="ck">（由属性推导，只作参考；MOV 移动速度本版不计算）</span></div>'
+      : (attrs.length
+        ? '<div class="stline" style="margin-top:6px"><span class="ck">派生</span> 还差属性：' +
+          ['体质','体型','意志','力量'].filter(k => typeof data[k] !== 'number').map(esc).join(' / ') +
+          '（补齐后自动算出 HP / MP / SAN 初始 / DB）</div>'
+        : '');
+    return attrHtml + skillHtml + memoHtml + derivedHtml +
+      (skills.length > 24 ? '<div class="stline">… 共 ' + skills.length + ' 项</div>' : '');
   },
   listChecks(ruleKey, card){
     if(card && card.family === 'coc7' && Object.keys(card.data).length){
-      const keys = Object.keys(card.data).filter(k => !COC_MEMO.has(k));
-      return {title:'📜 你卡上的技能（COC 7th）', sections:[
-        {h:'已绑定 ' + keys.length + ' 项 · 直接 .rc 名字即可掷', rows:keys.slice(0, 18).map(k => ({
-          k:esc(k), v:'<b>.rc ' + esc(k) + '</b>　·　奖惩骰 <b>.rc ' + esc(k) + ' +1</b>'
-        }))}
-      ], foot:[
+      const data = card.data;
+      const attrs = COC_ATTRS.filter(k => typeof data[k] === 'number');
+      const keys = Object.keys(data).filter(k => !COC_ATTR_SET.has(k) && !COC_MEMO.has(k));
+      const secs = [];
+      /* ★ 属性要单列一栏：它们不是"练出来的技能"，且 HP / MP / SAN / DB 全靠它们推导 ——
+       *   混在技能列表里，用户看不出自己属性是不是缺了体型（而缺体型就算不出 HP）。 */
+      if(attrs.length) secs.push({h:'属性 · ' + attrs.length + ' 项（派生值由它们推导）', rows:attrs.map(k => ({
+        k:esc(k), v:'<b>.rc ' + esc(k) + '</b>　' + data[k] +
+          (k === '体型' ? '　·　<b>HP 要用它</b>' : '') +
+          (k === '意志' ? '　·　<b>SAN 初始 / MP 用它</b>' : '') +
+          (k === '力量' ? '　·　<b>DB 与体格用它 + 体型</b>' : '')
+      }))});
+      secs.push({h:'技能 · ' + keys.length + ' 项 · 直接 .rc 名字即可掷', rows:keys.slice(0, 18).map(k => ({
+        k:esc(k), v:'<b>.rc ' + esc(k) + '</b>　·　奖惩骰 <b>.rc ' + esc(k) + ' +1</b>'
+      }))});
+      return {title:'📜 你卡上的属性与技能（COC 7th）', sections:secs, foot:[
+        attrs.length ? '' : '⚠️ 卡上还没有<b>属性</b> —— 补 <b>.st set 力量 60 体质 50 体型 60 敏捷 55</b> 后会自动算出 HP / MP / SAN 初始 / DB',
         '技能表是开放的：想加就 <b>.st set 开锁 30</b>，不用管表里有没有',
         '未绑的技能不能直接掷 —— 先 <b>.st set 名字 数值</b>，或 <b>.r 1d100</b> 裸掷'
-      ]};
+      ].filter(Boolean)};
     }
     return {title:'📜 COC 检定 · 本规则怎么用', sections:[
       {h:'还没有卡：先绑一张', rows:[
-        {k:'.st set 侦查 60 图书馆 50 心理学 40 hp 12 san 70', v:'技能名 数值，任意增减；绑完再看 .rc list 会列出你自己的技能'}
+        {k:'.st set 力量 60 体质 50 体型 60 敏捷 55 外貌 60 智力 75 意志 70 教育 70', v:'八大属性（都填百分比；英文 str / con / siz / dex / app / int / pow / edu 同样认）'},
+        {k:'.st set 侦查 60 图书馆 50 心理学 40', v:'技能名 + 数值，任意增减；绑完再看 .rc list 会列出你自己的属性与技能'}
       ]},
-      {h:'常用技能名参考（中英文都认）', rows:[
-        {k:'侦查 / 图书馆 / 心理学', v:'spot · library · psychology'},
-        {k:'说服 / 威吓 / 潜行',     v:'persuade · intimidate · stealth'},
-        {k:'急救 / 医学 / 手枪 / 格斗', v:'firstaid · medicine · handgun · brawl'},
-        {k:'幸运 / 灵感 / 意志',      v:'luck · idea · pow　（也常用作检定）'}
+      {h:'属性 vs 技能（★ 两者都是 1–99，都能 .rc）', rows:[
+        {k:'属性 8+1 项', v:'力量 体质 体型 敏捷 外貌 智力 意志 教育（+ 幸运）—— <b>HP / MP / SAN 初始 / DB 全由它们推导</b>'},
+        {k:'技能（开放列表）', v:'侦查 · 图书馆 · 心理学 · 说服 · 威吓 · 潜行 · 急救 · 医学 · 手枪 · 格斗 · 开锁 · 机械 · 攀爬 · 跳跃 · 游泳 · 驾驶 · 领航 · 神秘学 · 历史 · 考古 · 法律 · 会计 · 信用'},
+        {k:'怎么分', v:'属性是"这个人本身"，技能是"练过的"；两者检定方式一样，只是卡面分开摆'}
       ]}
     ], foot:[
       '★ COC 的技能表是开放列表 —— 上面只是参考，你写什么名字都能进卡',
-      'ℹ️ 检定是 1d100 ≤ 技能值；奖惩骰写法 <b>.rc 侦查 +1</b> / <b>.rc 侦查 -2</b>'
+      'ℹ️ 7 版<b>没有"灵感"这一属性</b>：灵感检定 = 智力检定（掷骰 ≤ 智力值）',
+      'ℹ️ 检定是 1d100 ≤ 数值；奖惩骰写法 <b>.rc 侦查 +1</b> / <b>.rc 侦查 -2</b>'
     ]};
   },
   runCheck({args, mode, card, ruleKey}){

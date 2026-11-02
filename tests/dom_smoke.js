@@ -121,10 +121,14 @@ async function boot(){
     }
   }
 
+  /* ★ 导出走**生产的** ask.js（与 main.js 同一份），不在这里另写一遍判断 ——
+   *   否则"测试替身抄生产逻辑"的老戏又要重演（真机验收 · 上翻失效那条）。 */
+  const {pickExportFormat} = await import('../apps/web/src/ask.js');
+  let picked = 'NOT_ASKED';
   const ui = createUI({
     code:'123456',
     onSubmit(text){ const reqId = net.send(text); ui.appendPending(reqId, text); },
-    onExport(){},
+    async onExport(){ picked = await pickExportFormat(ui); },
   });
   /* ★ 把 route 暴露出去：外层要做"真机路径"回归 —— 一个帧从 ws 进来走完整链路，
    *   不能只测直接调 ui 方法（上次上翻失效就是这么漏掉的）。 */
@@ -134,7 +138,7 @@ async function boot(){
   // createNet 内部会 new WebSocket(url) —— 已被替换为内存连接
   net.connect();
   await sleep(20);
-  return {ui, net, server};
+  return {ui, net, server, picked:() => picked};
 }
 
 function type(ui, net, text){
@@ -144,10 +148,17 @@ function type(ui, net, text){
 }
 
 (async () => {
-  const {ui, net, server} = await boot();
+  const bootApi = await boot();
+  const {ui, net, server} = bootApi;
+  /* ★ 导出弹窗选中的值：boot 里把 onExport 接到生产的 ask.js，
+     这里拿到的是**生产那份**的返回值（不是另写一份判断）。 */
+  const picked_ = () => bootApi.picked();
 
   const cmds = [
-    '.set rule coc', '.st set 侦查 60 图书馆 50 hp 12 san 70', '.rc 侦查', '.rc 侦查 +1', '.rc list',
+    /* ★ COC 属性（2026-11-01 补的属性与派生值）：必须真在页面里跑一遍 ——
+       卡面四段是 innerHTML 拼的，只有真 DOM 才知道拼出来对不对。 */
+    '.set rule coc', '.st set 力量 60 体质 50 体型 60 敏捷 55 智力 75 意志 70',
+    '.st set 侦查 60 图书馆 50 hp 12 san 70', '.st', '.rc 侦查', '.rc 侦查 +1', '.rc list', '.rc 力量',
     '.set rule dh', '.st set 敏捷 2 力量 2 灵巧 1 本能 0 风度 1 知识 -1', '.dh 敏捷 15', '.dh 15',
     '.set rule fu', '.st set dex d8 ins d10 mig d8 wlp d6 物语点 3 物资点 2', '.fu dex ins 10', '.fu dex ins 13 +2',
     '.set rule dnd', '.st set str 16 dex 14 lv 5', '.rc 巧手 15 p', '.st', '.h',
@@ -443,6 +454,103 @@ function type(ui, net, text){
     ok('★ 上翻整批插入后仍是正序', at('#1') < at('#2') && at('#2') < at('#3'),
       txt.map(x => x.replace(/\s+/g, '')).slice(0, 4).join(' | '));
     ok('★ 上翻的内容在原有内容之前', at('#3') < at('#9'), at('#3') + ' vs ' + at('#9'));
+  }
+
+  /* ★★ 导出弹窗：取消必须是取消（真机反馈 · 第 9 条）★★
+   * 【上一版】confirm('确定=md，取消=ndjson') —— 取消被当成了一个选项，
+   *   用户点取消实际下载了一份 ndjson。**取消按钮说了假话**。
+   * 【这里验什么】① 两个格式各是一个按钮 ② 取消是一个独立按钮，点了什么都不发生
+   *   ③ 点遮罩空白处 = 取消（手机上最容易点到遮罩，它必须与"取消"同义）
+   *   ④ 同一时刻不叠层。
+   *   断言走生产的 ask.js + ui.askChoice（不在这里另写一份判断）。 */
+  {
+    const {EXPORT_CHOICES} = await import('../apps/web/src/ask.js');
+    const btnExport = d.getElementById('btn-export');
+    ok('★ 顶栏有导出按钮', !!btnExport);
+    btnExport.dispatchEvent(new w.Event('click'));
+    await sleep(10);
+    const mask = d.querySelector('.mask');
+    ok('★ 点导出弹出选择弹窗（不是 confirm）', !!mask);
+    const btns = mask ? [...mask.querySelectorAll('.mbtn')] : [];
+    ok('★ 弹窗有「两个格式 + 一个取消」三个按钮', btns.length === 3, 'n=' + btns.length);
+    ok('★ 两个格式选项都在（md / ndjson）',
+      EXPORT_CHOICES.every(c => btns.some(b => b.textContent.indexOf(c.label) >= 0)),
+      btns.map(b => b.textContent.slice(0, 8)).join(' | '));
+    ok('★ 格式说明写明"哪个能导回房间"',
+      /导回房间/.test(mask ? mask.textContent : ''), (mask || {}).textContent);
+    const cancelBtn = btns[btns.length - 1];
+    ok('★ 最后一个按钮是取消（不是某个格式）', /取消/.test(cancelBtn.textContent), cancelBtn.textContent);
+
+    // ① 点取消 → 什么都不发生（picked 仍是 null，不是 'ndjson'）
+    cancelBtn.dispatchEvent(new w.Event('click'));
+    await sleep(10);
+    ok('★ 点取消 = 不导出（取消不是"导出 ndjson"的别名）',
+      picked_() === null, 'picked=' + JSON.stringify(picked_()));
+    ok('★ 取消后弹窗关闭', !d.querySelector('.mask'));
+
+    // ② 选一个格式 → 拿到那个格式的值
+    btnExport.dispatchEvent(new w.Event('click'));
+    await sleep(10);
+    d.querySelectorAll('.mask .mbtn')[1].dispatchEvent(new w.Event('click'));
+    await sleep(10);
+    ok('★ 选 NDJSON 得到 ndjson', picked_() === EXPORT_CHOICES[1].value, 'picked=' + JSON.stringify(picked_()));
+
+    // ③ 点遮罩空白处 = 取消
+    btnExport.dispatchEvent(new w.Event('click'));
+    await sleep(10);
+    d.querySelector('.mask').dispatchEvent(new w.Event('click'));
+    await sleep(10);
+    ok('★ 点遮罩空白处 = 取消（手机上最容易点到的就是这个）',
+      picked_() === null, 'picked=' + JSON.stringify(picked_()));
+
+    // ④ 连点两次不叠层
+    btnExport.dispatchEvent(new w.Event('click'));
+    btnExport.dispatchEvent(new w.Event('click'));
+    await sleep(10);
+    ok('★ 连点导出不会叠两层弹窗', d.querySelectorAll('.mask').length === 1,
+      'n=' + d.querySelectorAll('.mask').length);
+    d.querySelector('.mask').remove();
+  }
+
+  /* ★ COC 卡的属性与派生值（2026-11-01 疏漏修正）：真 DOM 里验卡面四段
+   * 【为什么这里要自己重新走一遍】前面的上翻 / 重载测试 ui.reset() 把聊天流清空了，
+   *   而且最后一条指令把规则切回了 generic、卡也换成了 D&D —— 直接查页面会查到空（假绿）。
+   *   所以这里重新"切 COC → 绑带属性的卡 → .st"，走**真机那条链路**（cmd 帧 → 服务端 → 广播 → 渲染）。 */
+  {
+    type(ui, net, '.set rule coc');
+    await sleep(30);
+    type(ui, net, '.st set 力量 60 体质 50 体型 60 敏捷 55 智力 75 意志 70 侦查 60');
+    await sleep(30);
+    type(ui, net, '.st');
+    await sleep(40);
+    const bubbles = [...d.querySelectorAll('.bubble')].map(e => e.textContent).join('\n');
+    ok('★ 真机链路下 COC 卡面有独立的属性行', /属性/.test(bubbles) && /力量/.test(bubbles) && /体型/.test(bubbles),
+      bubbles.slice(-140));
+    ok('★ 真机链路下 COC 卡面有派生行（HP / MP / SAN 初始 / DB）',
+      /派生/.test(bubbles) && /HP \d+/.test(bubbles) && /MP \d+/.test(bubbles),
+      bubbles.slice(-160));
+    ok('★ 技能格子里不含属性（属性不混进技能）',
+      !/<div class="cell">[^<]*<span class="ck">力量/.test(d.body.innerHTML));
+    /* ★ 派生值要**数值正确**，不能只是"出现了"：体质 50 + 体型 60 → HP 11；意志 70 → MP 14 / SAN 初始 70 */
+    ok('★ 派生值数值算对了（HP 11 / MP 14 / SAN 初始 70）',
+      /HP 11/.test(bubbles) && /MP 14/.test(bubbles) && /SAN 初始 70/.test(bubbles), bubbles.slice(-160));
+  }
+
+  /* ★ .help 的「当前规则」：规则名只在小标题里，不再单独重复一行、也不再出现"规则键"
+   * 【为什么这条要断言】F 组把"规则键"从 .status 里删掉了，help 里漏了一处 ——
+   *   这是典型的"横切决策只落实一处"。规则键（dnd5r）是机器标识，对玩家没有意义。 */
+  {
+    const {helpTop} = await import('../packages/engine/src/index.js');
+    for(const k of ['generic', 'dnd5e', 'dnd5r', 'coc7', 'dh', 'fu']){
+      const h = helpTop(k);
+      const sec = (h.sections || []).find(s => /^当前规则/.test(s.h || '')) || {};
+      ok('★ .help「当前规则」小标题带规则名（' + k + '）',
+        !!sec.h && sec.h.indexOf('当前规则 · ') === 0, sec.h);
+      ok('★ .help 不再出现"规则键"（' + k + '）',
+        !/规则键/.test(JSON.stringify(h)), JSON.stringify(sec));
+      ok('★ .help「当前规则」下不再重复一行内容（' + k + '）',
+        (sec.rows || []).length === 0, JSON.stringify(sec.rows || []));
+    }
   }
 
   console.log(bad ? ('\n❌ 端到端冒烟：' + bad + ' 项不通过') : '\n✅ 端到端冒烟全通过');

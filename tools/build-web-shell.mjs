@@ -132,8 +132,26 @@ const CSS = `
 .who{flex-wrap:wrap}
 .who .re{font-size:11px;font-weight:700;color:var(--tx);background:var(--chipbg);border:1px solid var(--chipline);border-radius:999px;padding:0 6px}
 .who .re.me{background:#e7f6ed;border-color:#cdebd8;color:var(--ok)}
+/* ★ 选择弹窗（导出格式）：confirm 只有两个出口，取消被当成一个选项用就变成了"说了假话"。
+   这里三按钮 —— 两个选项各干各的，取消就是取消（点遮罩空白处同义）。 */
+.mask{position:fixed;inset:0;z-index:40;background:rgba(17,20,28,.42);display:flex;align-items:center;justify-content:center;padding:18px}
+.mcard{width:100%;max-width:320px;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px 16px 12px;box-shadow:0 12px 32px rgba(17,20,28,.18)}
+.mt{font-size:15px;font-weight:800;margin-bottom:6px}
+.ms{font-size:12.5px;color:var(--tx2);line-height:1.6;margin-bottom:12px}
+.mbtns{display:flex;flex-direction:column;gap:8px}
+.mbtn{display:flex;flex-direction:column;gap:2px;text-align:left;font:inherit;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--tx);cursor:pointer}
+.mbtn b{font-size:14px;font-weight:700}
+.mbtn span{font-size:11.5px;color:var(--tx2);line-height:1.45}
+.mbtn:active{background:#f1f3f7}
+.mbtn.cancel{align-items:center;background:#f7f8fa;color:var(--tx2)}
+.mbtn.cancel b,.mbtn.cancel span{display:none}
 `;
 html = html.replace('</style>', CSS + '</style>');
+/* ★ 生成物必须自检：注入靠字符串替换，锚点一旦变了会**静默失效**（样式加完一 build 全没了）。
+   上一次是标题被覆盖回去才发现 —— 这里把"注入成功"变成每次必验的事实。 */
+for(const need of ['#gate{', '.loadbtn{', '.mask{', '.mbtn.cancel{', 'TRPG · 骰娘在线']){
+  if(!html.includes(need)) throw new Error('注入失败：index.html 里找不到 ' + need + '（锚点变了？）');
+}
 
 /* ★ 把 packages/ 复制进前端目录 vendor/（M3 部署踩坑后补）
  * 【为什么必须复制】Cloudflare 的 Static Assets **只托管 apps/web 一个目录**。

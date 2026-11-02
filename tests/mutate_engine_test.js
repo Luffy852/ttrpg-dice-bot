@@ -99,6 +99,18 @@ const MUTATIONS = [
    'card.js',
    "'\u6216\u7528 <b>.st clear</b> \u89e3\u7ed1\uff08\u89e3\u7ed1\u540e\u518d\u53d1 <b>.st</b> \u5c31\u662f\u5f53\u524d\u89c4\u5219\u7684\u89d2\u8272\u5361\u6a21\u677f\uff09'", "'\u3002'"],
 
+  ["★ COC 属性里去掉体型 SIZ（应被 §25 抓到）",
+   'coc.js',
+   "const COC_ATTRS = ['力量','体质','体型','敏捷','外貌','智力','意志','教育','幸运'];",
+   "const COC_ATTRS = ['力量','体质','敏捷','外貌','智力','意志','教育','幸运'];"],
+  ["★ COC 派生 HP 公式改错（应被 §25 抓到）",
+   'coc.js',
+   "out.hp = Math.floor((d['体质'] + d['体型']) / 10);",
+   "out.hp = Math.floor((d['体质'] + d['体型']) / 5);"],
+  ["★ COC 卡面把属性重新混进技能格（应被 §25 抓到）",
+   'pack_coc.js',
+   "const skills = Object.keys(data).filter(k => !COC_ATTR_SET.has(k) && !COC_MEMO.has(k));",
+   "const skills = Object.keys(data).filter(k => !COC_MEMO.has(k));"],
 ];
 
 let caught = 0; const missed = [];
