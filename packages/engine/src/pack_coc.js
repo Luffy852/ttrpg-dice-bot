@@ -2,7 +2,7 @@
  * 从 M2 的 ENGINE 区整体搬来，逻辑一行未改（由 676 项断言锁定）。
  */
 import { lookupAlias, normToken, suggestAlias } from './alias.js';
-import { COC_MEMO, COC_ATTRS, COC_ATTR_SET, cocDerived, judgeCoc, lookupCocSkill, rollPercent } from './coc.js';
+import { COC_MEMO, COC_MEMO_TEXT, COC_DERIVED_MEMO, COC_ATTRS, COC_ATTR_SET, cocDerived, judgeCoc, lookupCocSkill, rollPercent } from './coc.js';
 import { CARD_DOMAIN, checkDomainOf } from './domains.js';
 import { esc } from './util.js';
 import { buildTotal } from './view.js';
@@ -19,19 +19,21 @@ const COC_PACK = {
            '然后 <b>.rc 侦查</b>；或直接用 <b>.r 1d100</b> 裸掷。';
   },
   cardTemplate(){
+    /* ★ 真机反馈 · 第 2 条（单点独立判断，只作用于这个模板，不泛化到其他文案）：
+     *   ① 属性示例右边那句把中文属性名又列了一遍，与指令本身重复 → 移除（英文缩写 .help coc 里有）
+     *   ② 7 版没有"灵感"这一条，只在 .help coc 里说明就够了 → 模板里移除 */
     return {title:'尚未绑定角色卡', sections:[
       {h:'① 属性（八大项 + 幸运，都填百分比）', rows:[
-        {k:'.st set 力量 60 体质 50 体型 60 敏捷 55 外貌 60 智力 75 意志 70 教育 70', v:'力量 体质 体型 敏捷 外貌 智力 意志 教育（英文 str / con / siz / dex / app / int / pow / edu 同样认）'},
+        {k:'.st set 力量 60 体质 50 体型 60 敏捷 55 外貌 60 智力 75 意志 70 教育 70', v:''},
         {k:'.st set 幸运 65', v:'幸运也常单独给（可写 luck）'}
       ]},
       {h:'② 技能（开放列表，想加什么写什么）', rows:[
         {k:'.st set 侦查 60 图书馆 50 心理学 40', v:'技能名 数值，空格分隔，可任意增减'},
         {k:'.st set 开锁 30 手枪 45', v:'不在常用表里的名字也照收，原样进卡'}
       ]},
-      {h:'这张卡的三条规则', rows:[
+      {h:'这张卡的两条规则', rows:[
         {k:'属性与技能都按百分比', v:'两者都是 1–99，都能直接 <b>.rc 名字</b> 检定（1d100 ≤ 数值）'},
-        {k:'HP / MP / SAN 等是派生值', v:'由属性自动推导并显示在卡下方；手填的 <b>hp / san / mp</b> 是"当前值"，骰娘<b>不会自动增减</b>'},
-        {k:'7 版没有"灵感"这一项', v:'灵感检定 = 智力检定（掷骰 ≤ 智力值）；卡上的"灵感"只是你自定义的一个技能名'}
+        {k:'HP / MP / SAN 等是派生值', v:'设定属性后骰娘会给一条可复制的 <b>.st</b> 指令，贴一次即可录入；手填的 <b>hp / san / mp / db / 体格</b> 是"当前值"，骰娘<b>不会自动增减</b>'}
       ]}
     ], foot:['★ COC 检定 = 掷 1d100 ≤ 数值；奖惩骰见 <b>.help coc</b>']};
   },
@@ -43,6 +45,16 @@ const COC_PACK = {
       const e = lookupAlias(CARD_DOMAIN.coc7, raw);
       const key = e ? e.key : raw;                 // 未注册的自定义技能：原样作键（开放列表）
       const val = t[i + 1];
+      /* ★ DB / 体格是"伤害加值 / 体格标记"，值可以是 −2 / 0 / +1d4 / +1 ——
+       *   它们不是百分比技能，不能套用下面的 1–99（真机反馈 · 第 3 条：`.st set DB 0` 被拦）。
+       *   只收一个不含空格的短文本，原样存；渲染时 esc。 */
+      if(COC_MEMO_TEXT.has(key)){
+        if(val == null || val.length === 0 || val.length > 12){
+          errs.push('「' + raw + '」后面需要一个短值（如 0 / -1 / +1d4）'); i -= 1; continue;
+        }
+        data[key] = val;
+        continue;
+      }
       if(!/^\d+$/.test(val == null ? '' : val)){ errs.push('「' + raw + '」后面需要一个非负整数'); i -= 1; continue; }
       const v = parseInt(val, 10);
       if(COC_MEMO.has(key)){ if(v > 999){ errs.push(key.toUpperCase() + ' 需在 0–999'); continue; } }
@@ -51,11 +63,14 @@ const COC_PACK = {
     }
     return {data, errs, count:Object.keys(data).length};
   },
-  /* ★ 卡面四段：属性 / 技能 / 备忘（当前值）/ 派生（由属性算出的上限与初始值）
+  /* ★ 卡面三段：属性 / 技能 / 备忘（当前值）+ 一条**条件显示**的派生录入指令
    * 【为什么属性要单独一段】它们与技能**同值域、同检定链**（都是 1d100 ≤ 数值），
    *   但语义完全不同：技能是"练过的"，属性是"这个人本身"，且派生值只认属性。
-   *   混在一个格子列表里，用户既看不出自己属性齐不齐，也无从核对 HP 是怎么来的。
-   * 【为什么不把派生值写进卡】原则 6 —— 存副本迟早与属性漂移。这里每次现场推导。 */
+   * 【★ 真机反馈 · 第 3 条】原来常驻一行"派生 HP 11 / MP 14 / …(含 MOV 说明)"，
+   *   玩家把数值手填进备忘后，备忘行与派生行两行并列、内容几乎一样，观感很差。
+   *   现在借用"卡上还没有技能"那套条件显示：派生备忘字段**一个都没录** → 给一条算好结果的
+   *   `.st set` 指令，复制粘贴一次即可完成初始录入；录了任意一个 → 整块消失，卡面只剩备忘行。
+   * 【为什么不把派生值写进卡】原则 6 —— 副本迟早与属性漂移，这里每次现场推导。 */
   renderCard(card){
     const data = card.data || {};
     const attrs = COC_ATTRS.filter(k => typeof data[k] === 'number');
@@ -72,25 +87,25 @@ const COC_PACK = {
       ? '<div class="card">' + cells + '</div>'
       : '<div class="stline">（卡上还没有技能）</div>';
     const memoHtml = memo.length
-      ? '<div class="stline" style="margin-top:6px">' + memo.map(k => esc(k.toUpperCase()) + ' ' + data[k]).join('　·　') +
+      ? '<div class="stline" style="margin-top:6px">' + memo.map(k =>
+          esc(k.toUpperCase()) + ' ' + esc(String(data[k]))).join('　·　') +
         '　<span class="ck">（当前值 · 备忘，骰娘不自动增减）</span></div>'
       : '';
-    /* ★ 派生行：只列**当前算得出来**的，缺哪个属性就少哪一项 ——
-     *   与其拿半个属性算出一个假数，不如明确"你还差什么"。 */
+    /* ★ 只列**当前算得出来**的：属性不齐就少给几项，不拿半个属性凑一个假数。
+     *   指令里的键（HP / MP / SAN / DB / 体格）都是可手填的备忘字段，DB / 体格走宽松值域。 */
     const dv = cocDerived(data);
-    const parts = [];
-    if(dv.hp != null) parts.push('HP ' + dv.hp + '（=(体质+体型)/10）');
-    if(dv.mp != null) parts.push('MP ' + dv.mp + '（=意志/5）');
-    if(dv.san0 != null) parts.push('SAN 初始 ' + dv.san0 + '（=意志）');
-    if(dv.db != null) parts.push('DB ' + dv.db + '　体格 ' + (dv.build > 0 ? '+' : '') + dv.build + '（=力量+体型查表）');
-    const derivedHtml = parts.length
-      ? '<div class="stline" style="margin-top:6px"><span class="ck">派生</span> ' + parts.join('　·　') +
-        '<br><span class="ck">（由属性推导，只作参考；MOV 移动速度本版不计算）</span></div>'
-      : (attrs.length
-        ? '<div class="stline" style="margin-top:6px"><span class="ck">派生</span> 还差属性：' +
-          ['体质','体型','意志','力量'].filter(k => typeof data[k] !== 'number').map(esc).join(' / ') +
-          '（补齐后自动算出 HP / MP / SAN 初始 / DB）</div>'
-        : '');
+    const pairs = [];
+    if(dv.hp != null) pairs.push('HP ' + dv.hp);
+    if(dv.mp != null) pairs.push('MP ' + dv.mp);
+    if(dv.san0 != null) pairs.push('SAN ' + dv.san0);
+    if(dv.db != null) pairs.push('DB ' + dv.db);
+    if(dv.build != null) pairs.push('体格 ' + (dv.build > 0 ? '+' : '') + dv.build);
+    const recorded = COC_DERIVED_MEMO.some(k => data[k] !== undefined);
+    const derivedHtml = (!recorded && pairs.length)
+      ? '<div class="stline" style="margin-top:6px"><span class="ck">属性派生值分别为</span> ' +
+        pairs.join(' / ') + ' —— 复制下面这行一次性录入：<br>' +
+        '<span class="hk">' + esc('.st set ' + pairs.join(' ')) + '</span></div>'
+      : '';
     return attrHtml + skillHtml + memoHtml + derivedHtml +
       (skills.length > 24 ? '<div class="stline">… 共 ' + skills.length + ' 项</div>' : '');
   },
@@ -112,7 +127,7 @@ const COC_PACK = {
         k:esc(k), v:'<b>.rc ' + esc(k) + '</b>　·　奖惩骰 <b>.rc ' + esc(k) + ' +1</b>'
       }))});
       return {title:'📜 你卡上的属性与技能（COC 7th）', sections:secs, foot:[
-        attrs.length ? '' : '⚠️ 卡上还没有<b>属性</b> —— 补 <b>.st set 力量 60 体质 50 体型 60 敏捷 55</b> 后会自动算出 HP / MP / SAN 初始 / DB',
+        attrs.length ? '' : '⚠️ 卡上还没有<b>属性</b> —— 补 <b>.st set 力量 60 体质 50 体型 60 敏捷 55</b> 后，骰娘会给一条可复制的 .st 指令把初始派生值录入',
         '技能表是开放的：想加就 <b>.st set 开锁 30</b>，不用管表里有没有',
         '未绑的技能不能直接掷 —— 先 <b>.st set 名字 数值</b>，或 <b>.r 1d100</b> 裸掷'
       ].filter(Boolean)};

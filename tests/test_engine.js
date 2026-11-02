@@ -1559,7 +1559,12 @@ console.log('== 25. COC 卡缺属性（2026-11-01 真机疏漏 · 属性与派�
     const c = bindCard('.st set 力量 60 体质 50 体型 60 意志 70', 'coc7');
     ok('★ 派生值不进卡数据（只在渲染时推导）',
       Object.keys(c.data).every(k => k !== 'hp' && k !== 'mp' && k !== 'db'), JSON.stringify(c.data));
-    ok('★ 卡面显示派生行', /派生/.test(PACK.renderCard(c)), strip25(PACK.renderCard(c)).slice(-90));
+    /* ★ 2026-11-02 改口径：派生行不再是常驻说明，而是"未录入时给一条可复制的 .st 指令"。
+     *   只断言 /派生/ 是摆设（新文案里也有这两个字），要验的是**指令真的存在且算对了**。 */
+    const rc = PACK.renderCard(c);
+    ok('★ 未录入时给「属性派生值分别为」+ 可复制指令',
+      /属性派生值分别为/.test(rc) && /\.st set HP 11 MP 14 SAN 70 DB 0 体格 0/.test(rc),
+      strip25(rc).slice(-110));
   }
 
   // ④ 属性与技能检定同链：都是 1d100 ≤ 数值
@@ -1578,7 +1583,8 @@ console.log('== 25. COC 卡缺属性（2026-11-01 真机疏漏 · 属性与派�
     const tpTxt = JSON.stringify(tp);
     ok('★ 卡模板给了属性示例', /力量 60 体质 50 体型 60/.test(tpTxt), strip25(tpTxt).slice(0, 80));
     ok('★ 卡模板说明 HP/MP/SAN 是派生值', /派生值/.test(tpTxt));
-    ok('★ 卡模板说明 7 版没有灵感属性', /灵感/.test(tpTxt) && /智力/.test(tpTxt));
+    /* ★ 2026-11-02：用户单点判断 —— 灵感只留 .help coc 说明，模板里不再重复 */
+    ok('★ 卡模板不再重复「灵感」说明（只留 .help coc）', !/灵感/.test(tpTxt), strip25(tpTxt).slice(-80));
 
     const nc = PACK.noCardNote();
     ok('★ 无卡提示给的是属性 + 技能两条（不再只给技能）', /力量 60/.test(nc) && /侦查 60/.test(nc), strip25(nc).slice(0, 90));
@@ -1601,9 +1607,107 @@ console.log('== 25. COC 卡缺属性（2026-11-01 真机疏漏 · 属性与派�
   {
     eq('★ 别名域仍是零冲突（新增属性没撞车）', Engine.ALIAS.conflicts.length, 0);
     ok('★ 四族别名域互不相同', new Set(Object.values(Engine.CHECK_DOMAIN)).size === 4);
-    // ★ "体型"不能与"体格"混：体格是派生值，不是可写字段
+    /* ★ "体型"（SIZ 属性）不能与"体格"（Build 备忘）混 —— 体格现在**可以手填**，
+     *   但填进去只能落在体格字段，绝不能变成体型属性（否则 HP 会被凭空改掉）。 */
     const c = bindCard('.st set 体格 1', 'coc7');
-    ok('★ 写「体格」不会被当成属性（它是派生值）', !c.data['体型'], JSON.stringify(c.data));
+    ok('★ 写「体格」落进备忘字段，不会变成「体型」属性',
+      !c.data['体型'] && c.data['体格'] !== undefined, JSON.stringify(c.data));
+  }
+}
+
+console.log('== 26. 真机反馈第六轮（COC 卡呈现 4 条 · 2026-11-02）★ 本轮 ==');
+{
+  const strip26 = s => String(s == null ? '' : s).replace(/<[^>]+>/g, '');
+  const PACK = Engine.COC_PACK;
+  const HELP = JSON.stringify(Engine.helpCoc());
+  const ATTR_CARD = {family:'coc7', data:{力量:60, 体质:50, 体型:60, 敏捷:55,
+    外貌:60, 智力:75, 意志:70, 教育:70}};
+
+  // ① 反馈 1：MOV 那句"为什么不做"是内部实现理由，不向玩家披露
+  {
+    const visible = HELP + JSON.stringify(PACK.cardTemplate()) + PACK.renderCard(ATTR_CARD) +
+      JSON.stringify(PACK.listChecks('coc7', ATTR_CARD));
+    ok('★ 玩家可见文本不再出现「MOV / 移动速度」', !/MOV|移动速度/.test(visible), strip26(visible).slice(-100));
+    ok('★ 不再披露「没拿到原文 / 宁缺毋错 / 规则书那句」',
+      !/没拿到|宁缺毋错|规则书那句/.test(visible), strip26(visible).slice(-100));
+    ok('★ 派生值段仍在 .help coc（只删了那一句，不是删整段）',
+      /派生值/.test(HELP) && /DB \/ 体格/.test(HELP));
+  }
+
+  // ② 反馈 2：未绑卡模板只删点名的两处（★ 单点独立判断，不泛化到其他文案）
+  {
+    const tp = PACK.cardTemplate(), tpTxt = JSON.stringify(tp);
+    ok('★ 属性示例右边的重复说明已移除', tp.sections[0].rows[0].v === '',
+      JSON.stringify(tp.sections[0].rows[0].v));
+    ok('★ 模板不再有「灵感」那一整行', !/灵感/.test(tpTxt), strip26(tpTxt).slice(-100));
+    ok('★ 规则段改叫「两条规则」', /这张卡的两条规则/.test(tpTxt));
+    ok('★ .help coc 仍保留「灵感 = 智力检定」（唯一说明处）',
+      /灵感/.test(HELP) && /智力检定/.test(HELP));
+    /* ★ 不泛化：没被点名的技能段 / 无卡提示 / checkHint / .rc list 保持原样 ——
+     *   用户明确说"这是我的单点独立判断，不需要泛化成规则"。 */
+    ok('★ 技能段示例与说明没被顺手删（不泛化）',
+      /开锁 30 手枪 45/.test(tpTxt) && /技能名 数值/.test(tpTxt));
+    ok('★ 无卡提示 / checkHint / .rc list 没被顺手精简',
+      /力量 60/.test(PACK.noCardNote()) && /rc 力量/.test(PACK.checkHint()) &&
+      /属性 vs 技能/.test(JSON.stringify(PACK.listChecks('coc7', null))));
+  }
+
+  // ③ 反馈 3：一次性可复制指令 / 录完消失 / DB·体格 可手填
+  {
+    const h1 = PACK.renderCard(ATTR_CARD);
+    ok('★ 未录派生值时给「属性派生值分别为」', /属性派生值分别为/.test(h1), strip26(h1).slice(-110));
+    ok('★ 给的是一条算好结果、可照抄的 .st 指令',
+      /\.st set HP 11 MP 14 SAN 70 DB 0 体格 0/.test(h1), strip26(h1).slice(-110));
+    ok('★ 指令放在等宽 .hk 里（便于复制）', /class="hk"/.test(h1));
+    ok('★ 不再常驻「派生」行，也不再提醒 MOV',
+      !/由属性推导，只作参考|MOV 移动速度本版不计算/.test(h1));
+
+    /* ★ 不能只验"看着像指令" —— 要真的把这条指令照抄一遍，看它能不能录进卡。
+     * ★ 必须贴在**已有属性卡**上（.st set 是同族合并），而不是新建一张空卡：
+     *   新建空卡没有属性 → cocDerived 算不出东西 → 就算派生提示被误改成常驻也照样"不出现"，
+     *   断言就成了摆设（变异测试第一条就把它漏出来了）。真机场景是"先填属性、再贴指令"。 */
+    const cmd = (h1.match(/\.st set HP[^<]*/) || [''])[0];
+    const ctx2 = mkCtx('coc7', {family:'coc7', data:Object.assign({}, ATTR_CARD.data)});
+    runCmd(cmd, ctx2);
+    const c = ctx2.card;
+    ok('★ 照抄指令能真的把 5 项派生值录进卡',
+      !!c && c.data.hp === 11 && c.data.mp === 14 && c.data.san === 70 &&
+      String(c.data.db) === '0' && String(c.data['体格']) === '0', JSON.stringify(c && c.data));
+
+    // 录完之后：派生提示整块消失，只剩玩家自己填的备忘行（截图 3 的重复观感问题解决）
+    const h2 = PACK.renderCard(c);
+    ok('★ 录入后「属性派生值分别为」整块消失', !/属性派生值分别为/.test(h2), strip26(h2).slice(-100));
+    ok('★ 录入后备忘行仍在（当前值）', /HP 11/.test(h2) && /当前值/.test(h2));
+    eq('★ 录入后卡面不再出现两条重复的 HP 行', (strip26(h2).match(/HP 11/g) || []).length, 1);
+
+    // DB / 体格 是可手动录入的备忘字段，不是 1–99 技能
+    ok('★ .st set DB 0 不再报「需在 1–99」',
+      !/1–99/.test(JSON.stringify(PACK.parseCard('DB 0'))), JSON.stringify(PACK.parseCard('DB 0')));
+    ['DB +1d4', 'DB -2', '体格 -1', 'db 0', '伤害加值 +1d6', 'build 2'].forEach(s => {
+      const p = PACK.parseCard(s);
+      ok('★ 派生备忘值可录入：' + s, p.errs.length === 0 && p.count === 1, JSON.stringify(p));
+    });
+    ok('★ 「体格」不会被当成「体型」属性（两个词、两个字段）',
+      !PACK.parseCard('体格 1').data['体型'], JSON.stringify(PACK.parseCard('体格 1').data));
+    ok('★ DB / 体格 不进技能格（归备忘行）',
+      !/<div class="cell">[^<]*<span class="ck">DB/.test(PACK.renderCard({family:'coc7', data:{db:'0'}})));
+    // 宽松值域允许文本，渲染必须 esc（否则会往全房广播的消息里注入标签）
+    const hx = PACK.renderCard({family:'coc7', data:{db:'<img>'}});
+    ok('★ 备忘值走 esc 通道', !/<img>/.test(hx), hx.slice(-80));
+  }
+
+  // ④ 反馈 4：.help coc 示例里的 .rc 奖励1 是无效指令
+  {
+    const C = {family:'coc7', data:{侦查:60}};
+    const r1 = runCmd('.rc 奖励1', mkCtx('coc7', C))[0];
+    ok('★ 单独 .rc 奖励1 确实掷不了（缺技能名）—— 这就是原示例写错的原因',
+      r1.kind === 'notice' && /请给出技能名/.test(r1.html), strip26(r1.html).slice(0, 60));
+    const r2 = dice([3, 4], () => runCmd('.rc 侦查 奖励1', mkCtx('coc7', C)));
+    ok('★ 改成 .rc 侦查 奖励1 能正常掷出奖励骰',
+      lastMsg(r2).kind === 'roll' && /奖励骰/.test(lastMsg(r2).view.title), lastMsg(r2).view.title);
+    ok('★ .help coc 不再出现「.rc 奖励1」这种无效写法', !/\.rc 奖励1/.test(HELP));
+    ok('★ .help coc 的中文示例写成「技能名在前」',
+      /\.rc 侦查 奖励1/.test(HELP) && /技能名要写在前面/.test(HELP));
   }
 }
 

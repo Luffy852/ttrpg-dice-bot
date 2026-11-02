@@ -41,13 +41,26 @@ const COC_SKILLS = [
   {key:'智力',   aliases:['智力','int','intelligence']},
   {key:'san',   aliases:['理智','理智值','san','sanity']},
   {key:'hp',    aliases:['体力值','生命','生命值','hp','hitpoints','hit points']},
-  {key:'mp',    aliases:['魔法值','魔法','魔力','mp','magicpoints','magic points','magic']}
+  {key:'mp',    aliases:['魔法值','魔法','魔力','mp','magicpoints','magic points','magic']},
+  /* ★ DB（伤害加值）与体格也是**可手填的备忘字段**（真机反馈 · 第 3 条）。
+   * 【原来的 bug】没注册 → 写 `.st set DB 0` 会落成一个"自定义技能"，被开放技能表的
+   *   "1–99" 校验拦下（截图绿框「「DB」需在 1–99」）。DB 是 STR+SIZ 查表得出的伤害加值，
+   *   可以是 −2 / 0 / +1d4，根本不是百分比技能，本来就不该走那条校验。
+   * 【注意别混】体格 = Build（派生值），体型 = SIZ（属性），是两个词、两个字段。 */
+  {key:'db',    aliases:['db','伤害加值','伤害加成','伤害加深','damagebonus','damage bonus']},
+  {key:'体格',  aliases:['体格','build']}
 ];
 // 同一个名字在两个域都要能查：.rc 用它检定、.st set 用它写卡 —— 一张表注册两次，不手写第二份数据
 registerAliases(CHECK_DOMAIN.coc7, COC_SKILLS.map(s => ({key:s.key, kind:'cocskill', zh:s.key, display:s.key, aliases:s.aliases})));
 registerAliases(CARD_DOMAIN.coc7,  COC_SKILLS.map(s => ({key:s.key, display:s.key, aliases:s.aliases})));
-// hp / san / mp 是备忘字段（只显示，骰娘不自动增减），其余为可检定技能
-const COC_MEMO = new Set(['hp','san','mp']);
+// hp / san / mp / db / 体格 是备忘字段（只显示，骰娘不自动增减），其余为可检定技能
+const COC_MEMO = new Set(['hp','san','mp','db','体格']);
+/* ★ 宽松值域的备忘字段：DB 可能是 −2 / 0 / +1d4，体格可能是 −2 ~ +2，
+ *   它们不是"1–99 的百分比"也不是"0–999 的计数"，允许一个不含空格的短文本原样存。
+ *   （真机反馈 · 第 3 条：截图里 `.st set DB 0` 被「需在 1–99」拦下。） */
+const COC_MEMO_TEXT = new Set(['db','体格']);
+/* 派生值对应的备忘键 —— 用来判断"玩家是否已经把初始派生值录进卡了" */
+const COC_DERIVED_MEMO = ['hp','mp','san','db','体格'];
 
 /* ★ COC 的**属性**（9 项）—— 与技能是两类东西，卡上要分开摆（2026-11-01 真机疏漏）
  * 【原来的洞】COC 卡只有技能，八大属性（力量 / 体质 / 体型 / 敏捷 / 外貌 / 智力 / 意志 / 教育）
@@ -67,8 +80,7 @@ const COC_ATTR_ABBR = {力量:'STR', 体质:'CON', 体型:'SIZ', 敏捷:'DEX', �
 /* ★ 伤害加值 DB 与体格 Build：STR + SIZ 查表（7 版规则书 · 快速开始规则同表）
  *   调查员的 STR / SIZ 各 ≤ 90（3d6×5 / (2d6+6)×5），两者相加最大 180 —— 落在最后一档内，
  *   下面 5 档已覆盖全部正常取值；>204 的兜底只是防御性代码，正常玩不到。
- * ★ MOV（移动速度）不做：规则书有"DEX 与 STR 同低于 / 高于 SIZ 时 ±1"的细则，
- *   这次没拿到可引用的规则原文，宁可不做也不给一个记错的数。 */
+ * MOV（移动速度）不做 —— 这是内部实现说明，不写进任何玩家可见文案（真机反馈 · 第 1 条）。 */
 const DB_BUILD = [
   {max:64,  db:'-2',   build:-2},
   {max:84,  db:'-1',   build:-1},
@@ -145,4 +157,4 @@ function lookupCocSkill(name, card){
  */
 
 /* ★ 导出必须单行：tools/load-engine.js 剥 import 靠正则，多行 `export {` 会漏掉后半截（拼接路直接语法错误） */
-export { COC_SKILLS, COC_MEMO, COC_ATTRS, COC_ATTR_SET, COC_ATTR_ABBR, cocDerived, dbBuildOf, rollPercent, judgeCoc, lookupCocSkill };
+export { COC_SKILLS, COC_MEMO, COC_MEMO_TEXT, COC_DERIVED_MEMO, COC_ATTRS, COC_ATTR_SET, COC_ATTR_ABBR, cocDerived, dbBuildOf, rollPercent, judgeCoc, lookupCocSkill };

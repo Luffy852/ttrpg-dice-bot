@@ -512,10 +512,11 @@ function type(ui, net, text){
     d.querySelector('.mask').remove();
   }
 
-  /* ★ COC 卡的属性与派生值（2026-11-01 疏漏修正）：真 DOM 里验卡面四段
+  /* ★ COC 卡的属性与派生值（2026-11-02 呈现修正）：真 DOM 里走完整链路
    * 【为什么这里要自己重新走一遍】前面的上翻 / 重载测试 ui.reset() 把聊天流清空了，
    *   而且最后一条指令把规则切回了 generic、卡也换成了 D&D —— 直接查页面会查到空（假绿）。
-   *   所以这里重新"切 COC → 绑带属性的卡 → .st"，走**真机那条链路**（cmd 帧 → 服务端 → 广播 → 渲染）。 */
+   * 【本轮新增】不只是"看一眼提示在不在"，还要**把提示里那条指令真的复制粘贴发一遍**，
+   *   再确认派生提示消失、备忘行出现 —— 这正是反馈 3 要的"贴一次完成录入、之后不影响观感"。 */
   {
     type(ui, net, '.set rule coc');
     await sleep(30);
@@ -523,17 +524,35 @@ function type(ui, net, text){
     await sleep(30);
     type(ui, net, '.st');
     await sleep(40);
-    const bubbles = [...d.querySelectorAll('.bubble')].map(e => e.textContent).join('\n');
-    ok('★ 真机链路下 COC 卡面有独立的属性行', /属性/.test(bubbles) && /力量/.test(bubbles) && /体型/.test(bubbles),
-      bubbles.slice(-140));
-    ok('★ 真机链路下 COC 卡面有派生行（HP / MP / SAN 初始 / DB）',
-      /派生/.test(bubbles) && /HP \d+/.test(bubbles) && /MP \d+/.test(bubbles),
-      bubbles.slice(-160));
+    const lastBubble = () => {
+      const a = [...d.querySelectorAll('.bubble')];
+      return a.length ? a[a.length - 1].textContent : '';
+    };
+    const b1 = lastBubble();
+    ok('★ 真机链路下 COC 卡面有独立的属性行', /属性/.test(b1) && /力量/.test(b1) && /体型/.test(b1), b1.slice(-140));
+    ok('★ 未录派生值时给「属性派生值分别为」', /属性派生值分别为/.test(b1), b1.slice(-160));
+    ok('★ 派生值数值算对了（HP 11 / MP 14 / SAN 70 / DB 0 / 体格 0）',
+      /HP 11/.test(b1) && /MP 14/.test(b1) && /SAN 70/.test(b1) && /DB 0/.test(b1) && /体格 0/.test(b1), b1.slice(-160));
+    ok('★ 给的是一条可照抄的完整 .st 指令',
+      /\.st set HP 11 MP 14 SAN 70 DB 0 体格 0/.test(b1), b1.slice(-160));
     ok('★ 技能格子里不含属性（属性不混进技能）',
       !/<div class="cell">[^<]*<span class="ck">力量/.test(d.body.innerHTML));
-    /* ★ 派生值要**数值正确**，不能只是"出现了"：体质 50 + 体型 60 → HP 11；意志 70 → MP 14 / SAN 初始 70 */
-    ok('★ 派生值数值算对了（HP 11 / MP 14 / SAN 初始 70）',
-      /HP 11/.test(bubbles) && /MP 14/.test(bubbles) && /SAN 初始 70/.test(bubbles), bubbles.slice(-160));
+    ok('★ 玩家可见卡面不再出现 MOV / 移动速度', !/MOV|移动速度/.test(b1), b1.slice(-100));
+
+    // ★ 照抄那条指令发一遍，再 .st 看卡面
+    const cmd = (b1.match(/\.st set HP 11 MP 14 SAN 70 DB 0 体格 0/) || [''])[0];
+    type(ui, net, cmd);
+    await sleep(30);
+    type(ui, net, '.st');
+    await sleep(40);
+    const b2 = lastBubble();
+    ok('★ 照抄指令后派生提示整块消失', !/属性派生值分别为/.test(b2), b2.slice(-140));
+    ok('★ 照抄后备忘行出现（玩家自己填的当前值）',
+      /HP 11/.test(b2) && /MP 14/.test(b2) && /SAN 70/.test(b2) && /DB 0/.test(b2) && /当前值/.test(b2), b2.slice(-160));
+    ok('★ 录入后不再有两条重复的派生/备忘块（观感）',
+      (b2.match(/HP 11/g) || []).length === 1, b2.slice(-160));
+    ok('★ DB 0 没被「需在 1–99」拦下（备忘字段可手填）',
+      !/1–99/.test(b2) && /DB 0/.test(b2), b2.slice(-100));
   }
 
   /* ★ .help 的「当前规则」：规则名只在小标题里，不再单独重复一行、也不再出现"规则键"

@@ -111,6 +111,22 @@ const MUTATIONS = [
    'pack_coc.js',
    "const skills = Object.keys(data).filter(k => !COC_ATTR_SET.has(k) && !COC_MEMO.has(k));",
    "const skills = Object.keys(data).filter(k => !COC_MEMO.has(k));"],
+  ["★ 把 MOV 的内部理由重新披露给玩家（应被 §26 抓到）",
+   'help.js',
+   "{k:'怎么录进卡', v:'设定属性后骰娘会给一条 <b>.st set HP … MP … SAN … DB … 体格 …</b>，复制粘贴发一次即可；录入后卡上不再重复显示'},",
+   "{k:'MOV 移动速度', v:'本版<b>不计算</b>：规则书那句没拿到可引用的原文，宁缺毋错'},"],
+  ["★ 派生提示改回常驻显示（应被 §26 抓到）",
+   'pack_coc.js',
+   "const derivedHtml = (!recorded && pairs.length)",
+   "const derivedHtml = (pairs.length)"],
+  ["★ DB / 体格 退回 1–99 技能校验（应被 §26 抓到）",
+   'pack_coc.js',
+   "if(COC_MEMO_TEXT.has(key)){",
+   "if(false){"],
+  ["★ .help coc 的中奖示例改回无效的 .rc 奖励1（应被 §26 抓到）",
+   'help.js',
+   "{k:'.rc 侦查 奖励1 / .rc 侦察 惩罚2', v:'中文参数同样认（奖 / 罚 / 奖励 / 惩罚）—— 技能名要写在前面'},",
+   "{k:'.rc 奖励1 / .rc 侦察 惩罚2', v:'中文同样认（奖 / 罚 / 奖励 / 惩罚）'},"],
 ];
 
 let caught = 0; const missed = [];
