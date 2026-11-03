@@ -10,7 +10,7 @@
 import {createNet} from './net.js';
 import {applyBatch} from './batch.js';
 import {createUI} from './ui.js';
-import {pickExportFormat} from './ask.js';
+import {pickExportFormat, buildExportQuery} from './ask.js';
 
 const $ = id => document.getElementById(id);
 const store = {
@@ -88,8 +88,12 @@ function enter(r){
     async onExport(){
       const pick = await pickExportFormat(ui);
       if(!pick) return;                    // ★ 取消 = 什么都不做，不再偷偷导出一份
-      location.href = '/api/room/' + room.code + '/export?format=' +
-        pick + '&token=' + encodeURIComponent(room.token);
+      /* ★ v1.1：URL 由 ask.js 的纯函数拼（生产与冒烟跑同一份）——
+       *   只追加非空筛选参数，没设范围时查询串与 v1 逐字相同。
+       *   日期写反在弹窗里已就地拦过，这里再兜一道（防别人绕过弹窗直接调）。 */
+      if(pick.error) return ui.note('导出范围不对：' + pick.error);
+      location.href = buildExportQuery({code:room.code, token:room.token,
+        format:pick.format, filters:pick.filters});
     },
     /* ★ 导入战报（真机反馈 · 第 8 条）：把 NDJSON 灌回**当前房间**
      *  【为什么要先问一句】导入会往房间里写消息，且不可撤销 —— 手滑选错文件就污染了房间。

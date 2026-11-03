@@ -425,6 +425,83 @@ console.log('\n== J8 前置. 导入鉴权与网关状态透传（真机「新增
   ok('★ 跳过数也是数字', typeof ab.skipped === 'number', JSON.stringify(ab));
 }
 
+/* ---------------------------------- F2 ----------------------------------
+ * ★★ 导出筛选（v1.1）：必须跑真 DO + 真 SQLite + 真网关 ★★
+ * 【为什么单测不够】sql.js 与 workerd 的 SQLite 对绑定参数、IN 列表、日期毫秒的处理
+ *   未必一致；而且筛选参数要穿过 index.js 的网关才能到 DO。这一层就是验"拼出来的 URL
+ *   真的能筛出正确条数"，顺便验**续期范围跟着筛选走**（最容易被写错的一处）。 */
+console.log('\n== F2. 导出筛选（日期 / 参与者 / 续期范围）==');
+{
+  const R = await createRoom();
+  const j = await join(R.code, '筛选测试', 'cid-filter-owner');
+  const now = Date.now(), DAY = 86400000;
+  const bjDay = t => new Date(t + 8 * 3600000).toISOString().slice(0, 10);
+  const rows = [
+    {seq:1, id:'777777:1', ts:now - 3 * DAY, kind:'chat', from:'老王', actor:'老王', payload:{text:'三天前 老王'}},
+    {seq:2, id:'777777:2', ts:now - 2 * DAY, kind:'chat', from:'小李', actor:'小李', payload:{text:'两天前 小李'}},
+    {seq:3, id:'777777:3', ts:now - 1 * DAY, kind:'chat', from:'老王', actor:'老王', payload:{text:'昨天 老王'}},
+    {seq:4, id:'777777:4', ts:now,           kind:'chat', from:'小李', actor:'小李', payload:{text:'今天 小李'}},
+  ];
+  const imp = await apiImport(R.code, j.token, rows.map(r => JSON.stringify(r)).join('\n'));
+  eq('F2 造数据：4 条导入成功', imp.imported, 4);
+
+  const exp = async (qs, format) => {
+    const r = await fetch(BASE + '/api/room/' + R.code + '/export?token=' + encodeURIComponent(j.token) +
+      (format ? '&format=' + format : '') + (qs ? '&' + qs : ''));
+    return {status:r.status, text:await r.text()};
+  };
+  const lines = t => t.split('\n').filter(Boolean)
+    .map(l => { try{ return JSON.parse(l); }catch(e){ return null; } }).filter(Boolean);
+
+  // ① 空筛选 = 全量（4 条 + 导入提示）；URL 与 v1 完全相同
+  const all = await exp('', 'ndjson');
+  eq('F2a 空筛选导出成功', all.status, 200);
+  eq('F2a 空筛选导出全部 5 条（含那条持久化的导入提示）', lines(all.text).length, 5);
+
+  // ② 参与者：按昵称，跨房间导入进来的消息也认
+  const wang = await exp('sender=' + encodeURIComponent('老王'), 'ndjson');
+  eq('F2b 只筛老王 = 2 条', lines(wang.text).length, 2);
+  ok('F2b 导出的每条 from 都是老王', lines(wang.text).every(m => m.from === '老王'));
+  const bot = await exp('sender=' + encodeURIComponent('骰娘'), 'ndjson');
+  eq('F2b「骰娘 / 系统」筛出 1 条导入提示', lines(bot.text).length, 1);
+
+  // ③ 日期：北京时区的"今天"
+  const today = bjDay(now);
+  const d = await exp('from=' + today + '&to=' + today, 'ndjson');
+  eq('F2c 只筛今天 = 2 条（今天那条 + 导入提示）', lines(d.text).length, 2);
+  const dayStartMs = Date.parse(today + 'T00:00:00+08:00');
+  ok('F2c 每条 ts 都落在北京时区的这一天',
+    lines(d.text).every(m => m.ts >= dayStartMs && m.ts <= dayStartMs + DAY - 1),
+    lines(d.text).map(m => m.ts).join(','));
+
+  // ④ 组合条件（日期 + 参与者）
+  const combo = await exp('from=' + today + '&to=' + today + '&sender=' + encodeURIComponent('小李'), 'ndjson');
+  eq('F2d 今天的 + 小李 = 1 条', lines(combo.text).length, 1);
+
+  // ⑤ 范围写反：明确 400，不静默交换日期
+  const bad = await exp('from=2026-11-03&to=2026-11-01', 'ndjson');
+  eq('F2e 起始晚于结束 → 400', bad.status, 400);
+  ok('F2e 回包是 bad_date_range', /bad_date_range/.test(bad.text), bad.text.slice(0, 120));
+
+  // ⑥ SQL 注入串只能当普通昵称（参数绑定），不会炸也不会绕过筛选
+  const inj = await exp('sender=' + encodeURIComponent("老王' OR 1=1 --"), 'ndjson');
+  eq('F2f 注入串不炸库', inj.status, 200);
+  eq('F2f 注入串筛出 0 条（没有绕过筛选）', lines(inj.text).length, 0);
+
+  // ⑦ ★ 续期范围跟着筛选走：全量续 5 条，筛老王只续 2 条
+  /* sleep 是必要的：until = Date.now()+30d，两次导出若同一毫秒会拿到同一个 until，
+     COUNT WHERE keep_until=until 就会把上一次续过的 3 条也算进来（偶发假红）。 */
+  const mdAll = await exp('', 'md');
+  const nAll = Number((mdAll.text.match(/本次导出已为 (\d+) 条消息续期/) || [])[1]);
+  eq('F2g 全量导出给 5 条续期', nAll, 5);
+  await sleep(40);
+  const mdWang = await exp('sender=' + encodeURIComponent('老王'), 'md');
+  const nWang = Number((mdWang.text.match(/本次导出已为 (\d+) 条消息续期/) || [])[1]);
+  eq('F2g ★ 筛选导出只给筛中的 2 条续期（不给全房续命）', nWang, 2);
+  ok('F2g 战报头写明导出范围', /导出范围：/.test(mdWang.text));
+  ok('F2g 战报头写明只给这批续期', /只给本次导出的这些消息续期/.test(mdWang.text));
+}
+
 ca.close();
 
 console.log('\n---------------------------');

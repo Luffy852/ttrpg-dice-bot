@@ -145,11 +145,24 @@ const CSS = `
 .mbtn:active{background:#f1f3f7}
 .mbtn.cancel{align-items:center;background:#f7f8fa;color:var(--tx2)}
 .mbtn.cancel b,.mbtn.cancel span{display:none}
+/* ★ 导出筛选表单（v1.1）：index.html 是生成物，这里才是唯一出处，手改会被 build 覆盖回去 */
+.mfilters{border:1px solid var(--line);border-radius:10px;padding:10px;margin:0 0 12px;background:#fafbfc}
+.mfrow{display:flex;gap:8px;margin-bottom:8px}
+.mfrow label{flex:1;min-width:0;font-size:11.5px;color:var(--tx2);display:flex;flex-direction:column;gap:3px}
+.mfrow input{font:inherit;font-size:12.5px;padding:6px 7px;border:1px solid var(--line);border-radius:7px;background:#fff;color:var(--tx);width:100%;box-sizing:border-box}
+.mflabel{font-size:11.5px;color:var(--tx2);margin:2px 0 6px}
+.mfchips{display:flex;flex-wrap:wrap;gap:6px;max-height:92px;overflow:auto;margin-bottom:8px}
+.mfchip{display:inline-flex;align-items:center;gap:4px;font-size:11.5px;padding:4px 8px;border:1px solid var(--line);border-radius:999px;background:#fff;color:var(--tx2);cursor:pointer;user-select:none}
+.mfchip input{margin:0;width:13px;height:13px;accent-color:var(--ok)}
+.mfchip.on{background:#e7f6ed;border-color:#cdebd8;color:#1b6b3a}
+.mf-other{font:inherit;font-size:12px;width:100%;box-sizing:border-box;padding:6px 8px;border:1px solid var(--line);border-radius:7px;background:#fff;color:var(--tx)}
+.mferr{min-height:15px;font-size:11.5px;color:var(--no);margin-top:4px}
+.mfnote{font-size:11px;color:var(--tx3);line-height:1.5;margin-top:2px}
 `;
 html = html.replace('</style>', CSS + '</style>');
 /* ★ 生成物必须自检：注入靠字符串替换，锚点一旦变了会**静默失效**（样式加完一 build 全没了）。
    上一次是标题被覆盖回去才发现 —— 这里把"注入成功"变成每次必验的事实。 */
-for(const need of ['#gate{', '.loadbtn{', '.mask{', '.mbtn.cancel{', 'TRPG · 骰娘在线']){
+for(const need of ['#gate{', '.loadbtn{', '.mask{', '.mbtn.cancel{', '.mfilters{', '.mfchip.on{', 'TRPG · 骰娘在线']){
   if(!html.includes(need)) throw new Error('注入失败：index.html 里找不到 ' + need + '（锚点变了？）');
 }
 

@@ -244,45 +244,141 @@ export function createUI({code, onSubmit, onExport, onImport}){
     });
   }
 
-  /* ---------- 选择弹窗（★ 「取消」必须是取消，不是一个选项） ----------
+  /* ---------- 弹窗底座（★ 「取消」必须是取消，不是一个选项） ----------
    * 【为什么不用 confirm】confirm 只有「确定 / 取消」两个出口。上一版把「取消」
    *   当成"导出 NDJSON"来用 —— 于是用户点取消，实际上下载了一份文件。
    *   这不是"少了个选项"，是**取消按钮说了假话**：它执行的不是它写的那个动作。
    * 【三条硬规矩】① 选项按钮各自执行自己的动作 ② 取消/点遮罩/Esc 一律 = 什么都不做
    *   ③ 同一时刻只允许一个弹窗（连点两次导出时不会叠两层）。
-   * @returns {Promise<string|null>} 选中项的 value；null = 用户取消了 */
-  function askChoice({title, sub, options, cancel}){
+   * 【★ 抽成底座】导出弹窗多了筛选表单，但"取消语义"必须与格式弹窗**同一份实现** ——
+   *   各写一遍迟早又冒出"某条路径的取消偷偷干了别的"。 */
+  function askDialog(html, build){
     return new Promise(resolve => {
       const prev = document.querySelector('.mask');
       if(prev) prev.remove();                      // ★ 不叠层：连点两次只留最新那个
-      const $ = document.createElement.bind(document);
       const mask = document.createElement('div');
       mask.className = 'mask';
-      mask.innerHTML = '<div class="mcard">' +
-        (title ? '<div class="mt">' + Engine.esc(title) + '</div>' : '') +
-        (sub ? '<div class="ms">' + sub + '</div>' : '') +     // sub 允许调用方给 <b>（已在 ask.js 内写好）
-        '<div class="mbtns"></div></div>';
-      const box = mask.querySelector('.mbtns');
-      (options || []).forEach(o => {
-        const b = document.createElement('button');
-        b.className = 'mbtn';
-        b.innerHTML = '<b>' + Engine.esc(o.label) + '</b>' +
-          (o.desc ? '<span>' + Engine.esc(o.desc) + '</span>' : '');
-        b.addEventListener('click', () => { close(); resolve(o.value); });
-        box.appendChild(b);
-      });
-      const c = document.createElement('button');
-      c.className = 'mbtn cancel';
-      c.textContent = cancel || '取消';
-      c.addEventListener('click', () => { close(); resolve(null); });
-      box.appendChild(c);
+      mask.innerHTML = '<div class="mcard">' + html + '</div>';
+      let settled = false;
+      function finish(v){
+        if(settled) return;
+        settled = true;
+        mask.remove();
+        document.removeEventListener('keydown', onKey);
+        resolve(v);
+      }
+      function onKey(e){ if(e.key === 'Escape') finish(null); }
       /* ★ 点遮罩空白处 = 取消：手机上最容易点到的就是遮罩，它必须与"取消"同义 */
-      mask.addEventListener('click', e => { if(e.target === mask){ close(); resolve(null); } });
-      function onKey(e){ if(e.key === 'Escape'){ close(); resolve(null); } }
+      mask.addEventListener('click', e => { if(e.target === mask) finish(null); });
       document.addEventListener('keydown', onKey);
-      function close(){ mask.remove(); document.removeEventListener('keydown', onKey); }
+      build(mask, finish);
       document.body.appendChild(mask);
     });
+  }
+
+  /** 通用选择弹窗（保留给以后用）；@returns {Promise<string|null>} */
+  function askChoice({title, sub, options, cancel}){
+    return askDialog(
+      (title ? '<div class="mt">' + Engine.esc(title) + '</div>' : '') +
+      (sub ? '<div class="ms">' + sub + '</div>' : '') +   // sub 允许调用方给 <b>（已在 ask.js 内写好）
+      '<div class="mbtns"></div>',
+      (mask, finish) => {
+        const box = mask.querySelector('.mbtns');
+        (options || []).forEach(o => {
+          const b = document.createElement('button');
+          b.className = 'mbtn';
+          b.innerHTML = '<b>' + Engine.esc(o.label) + '</b>' +
+            (o.desc ? '<span>' + Engine.esc(o.desc) + '</span>' : '');
+          b.addEventListener('click', () => finish(o.value));
+          box.appendChild(b);
+        });
+        const c = document.createElement('button');
+        c.className = 'mbtn cancel';
+        c.textContent = cancel || '取消';
+        c.addEventListener('click', () => finish(null));
+        box.appendChild(c);
+      });
+  }
+
+  /* ---------- 导出弹窗：格式 + 筛选范围（一次问完，不弹两次） ----------
+   * 【为什么不拆成两个弹窗】用户点一次导出要连点两次"下一步"很烦；而且两次弹窗
+   *   各有一次"取消"，语义反而更容易走偏。
+   * 【参与者为什么是昵称】跨房间导入的消息保留原昵称但 anon_id 属于别的房间，
+   *   按 anon_id 筛会静默漏掉；另留"其他昵称"输入框覆盖已退出成员。
+   * 【默认全不勾 = 全部】不去让用户先取消十几个勾，留空就是 v1 的全量导出。
+   * @returns {Promise<{value,from,to,senders}|null>} null = 取消 */
+  function askExport({title, sub, choices, members, botLabel, cancel}){
+    return askDialog(
+      (title ? '<div class="mt">' + Engine.esc(title) + '</div>' : '') +
+      (sub ? '<div class="ms">' + sub + '</div>' : '') +
+      '<div class="mfilters">' +
+        '<div class="mfrow">' +
+          '<label>起始 <input type="date" data-f="from"></label>' +
+          '<label>结束 <input type="date" data-f="to"></label>' +
+        '</div>' +
+        '<div class="mflabel">参与者（都不勾 = 全部）</div>' +
+        '<div class="mfchips"></div>' +
+        '<input class="mf-other" type="text" placeholder="其他昵称，逗号分隔（跨房间 / 已退出成员）">' +
+        '<div class="mferr"></div>' +
+        '<div class="mfnote">留空 = 导出全部并给全房续期；设了范围 = 只给本次导出的消息续期 30 天</div>' +
+      '</div>' +
+      '<div class="mbtns"></div>',
+      (mask, finish) => {
+        const chipsBox = mask.querySelector('.mfchips');
+        const seen = new Set();
+        function addChip(value, label){
+          if(seen.has(value)) return;
+          seen.add(value);
+          const l = document.createElement('label');
+          l.className = 'mfchip';
+          l.innerHTML = '<input type="checkbox" value="' + Engine.esc(value) + '">' +
+                        '<span>' + Engine.esc(label) + '</span>';
+          /* ★ 用 class 而不是 CSS :has()：老一点的手机浏览器不支持 :has，
+           *   选中态会整个消失（功能还在，但看着像没勾上）。 */
+          const cb = l.querySelector('input');
+          cb.addEventListener('change', () => l.classList.toggle('on', cb.checked));
+          chipsBox.appendChild(l);
+        }
+        (members || []).forEach(m => {
+          const n = String((m && (m.nick || m.name)) || '').trim();
+          if(n) addChip(n, n);
+        });
+        /* 骰娘 / 系统消息：from_name 就是 '骰娘'，与战报里看到的一致 */
+        addChip('骰娘', botLabel || '骰娘 / 系统');
+
+        function collect(value){
+          const from = (mask.querySelector('[data-f="from"]') || {}).value || '';
+          const to   = (mask.querySelector('[data-f="to"]')   || {}).value || '';
+          const senders = [...mask.querySelectorAll('.mfchips input:checked')].map(i => i.value);
+          const other = (mask.querySelector('.mf-other') || {}).value || '';
+          String(other).split(/[,，、;；]/).forEach(s => { const v = s.trim(); if(v) senders.push(v); });
+          return {value, from, to, senders};
+        }
+        const err = mask.querySelector('.mferr');
+        const box = mask.querySelector('.mbtns');
+        (choices || []).forEach(o => {
+          const b = document.createElement('button');
+          b.className = 'mbtn';
+          b.innerHTML = '<b>' + Engine.esc(o.label) + '</b>' +
+            (o.desc ? '<span>' + Engine.esc(o.desc) + '</span>' : '');
+          b.addEventListener('click', () => {
+            const pick = collect(o.value);
+            /* ★ 范围写反就地提示、不关弹窗：静默交换日期会导出一份用户看不懂的结果 */
+            if(pick.from && pick.to && pick.from > pick.to){
+              err.textContent = '起始日期不能晚于结束日期';
+              return;
+            }
+            err.textContent = '';
+            finish(pick);
+          });
+          box.appendChild(b);
+        });
+        const c = document.createElement('button');
+        c.className = 'mbtn cancel';
+        c.textContent = cancel || '取消';
+        c.addEventListener('click', () => finish(null));
+        box.appendChild(c);
+      });
   }
 
   /* ---------- 键盘适配（M2 真机验证三件套，原样搬） ---------- */
@@ -303,7 +399,9 @@ export function createUI({code, onSubmit, onExport, onImport}){
 
   return {
     append, prepend, appendPending, failPending, failAll, refreshTop, toBottom,
-    setPaging, doneLoadingOlder, onLoadOlder, reset, askChoice,
+    setPaging, doneLoadingOlder, onLoadOlder, reset, askChoice, askExport,
+    /* ★ 导出弹窗要列当前成员当筛选项：从 setMembers 收到的那一份读，不另存一份副本 */
+    members(){ return (st.members || []).slice(); },
     setRoom(r){
       if(r.rule) st.rule = r.rule;
       if(r.baredice != null) st.baredice = !!r.baredice;

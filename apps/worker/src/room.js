@@ -17,7 +17,8 @@
 import {DurableObject} from 'cloudflare:workers';
 import {createRoomCore} from './core.js';
 import {checkIn, IN, ERR, OUT} from '../../../packages/protocol/src/frames.js';
-import {exportAs, FORMAT, fromNdjson} from './export.js';
+import {exportAs, FORMAT, fromNdjson, buildFilterClause} from './export.js';
+import {parseFilters, filterSummary, hasFilters} from '../../../packages/protocol/src/export-filter.js';
 import {planImport, mergeOrder} from './core.js';
 import {ymdhm, esc} from '../../../packages/engine/src/util.js';
 import {verifyToken, verifyPin, newSalt, hashPin, signToken, TOKEN_TTL} from './auth.js';
@@ -418,7 +419,14 @@ export class RoomDO extends DurableObject {
       const t = url.searchParams.get('token');
       const v = await verifyToken(t, this.env.PIN_SECRET);
       if(!v.ok) return Response.json({error:v.why}, {status:401});
-      const all = this.sql.exec('SELECT * FROM messages ORDER BY seq').toArray()
+      /* ★★ 导出筛选（v1.1）：日期范围 + 参与者昵称，参数规范与前端共用 protocol 包。★★
+       * 【空筛选 = 全部】clause 为空串，下面三条 SQL 与 v1 逐字一致 —— 老行为一个字没动。
+       * 【范围写反】直接 400，不静默交换日期（交换出来的结果用户看不懂，还以为筛对了）。 */
+      const filters = parseFilters(url.searchParams);
+      if(filters.error) return Response.json({error:'bad_date_range',
+        note:'起始日期晚于结束日期'}, {status:400});
+      const {clause, args} = buildFilterClause(filters);
+      const all = this.sql.exec('SELECT * FROM messages WHERE 1 = 1' + clause + ' ORDER BY seq', ...args).toArray()
         .map(r => ({seq:r.seq, id:r.id, ts:r.ts, kind:r.kind, from:r.from_name, actor:r.actor,
                     anon_id:r.anon_id, req_id:r.req_id, rule_at:r.rule_at, payload:JSON.parse(r.payload)}));
       const room = this.sql.exec('SELECT rule FROM room WHERE id = 1').toArray()[0] || {};
@@ -428,17 +436,33 @@ export class RoomDO extends DurableObject {
        *   且这批消息在 B 的战报里以 B 的身份出现 —— 于是 A→B→C 的接力成为可能。
        * 【为什么不是绝对豁免】绝对豁免 = 无上限堆积；这里给的是"每次导出续 30 天"，
        *   你不主动导，它照常在 30 天后消失 —— 保留默认清理，只在用户明确要时延长。 */
-      const until = Date.now() + KEEP_DAYS * DAY;
+      const now = Date.now();
+      const until = now + KEEP_DAYS * DAY;
       /* ★ 续"当前还活着"的：未过期(ts >= cut) **或** 已被续期救活的(keep_until > now)。
        *   只判 ts 会漏掉后者 —— 而那正是靠接力保下来的老消息，
-       *   用户说的"每次导出都是一次刷新"就断在这一跳上。 */
+       *   用户说的"每次导出都是一次刷新"就断在这一跳上。
+       * 【★ v1.1 口径】筛选导出时，**续期范围 = 本次导出的那一批**（同一个 clause）。
+       *   用户表达的是"我要保留这些内容"，不该顺手给全房续命；不筛选时仍是全房续期，
+       *   与"导出 = 手动续期按钮"完全一致。弹窗与战报头都会写明这一点。 */
       const cut = cut0();
-      this.sql.exec('UPDATE messages SET keep_until = ? WHERE ts >= ? OR keep_until > ?', until, cut, Date.now());
-      const renewed = this.sql.exec('SELECT COUNT(*) AS c FROM messages WHERE keep_until = ?', until).toArray()[0].c;
+      this.sql.exec('UPDATE messages SET keep_until = ? WHERE (ts >= ? OR keep_until > ?)' + clause,
+        until, cut, now, ...args);
+      /* ★★ renewed 必须数"本次 UPDATE 实际写进去多少条"，不能跟着筛选条件数。★★
+       * 【踩过的坑】曾经给这个 COUNT 也拼了 clause，结果它变成"筛出几条"——
+       *   如果有人把 UPDATE 的 clause 漏掉（筛选导出却给全房续命），COUNT 仍报 2，
+       *   战报头看着完全正常，真跑断言也被骗过去（先红后绿实测抓出来的摆设断言）。
+       * 【另一个好处】筛出的消息里若有"已过期且没被续活"的，UPDATE 的条件不会碰它，
+       *   不带 clause 的 COUNT 不会把它虚报成"已续期"，文案才说实话。
+       * 【v1 兼容】这条 COUNT 与升级前逐字一致，无筛选时数字不变。 */
+      const renewed = this.sql.exec('SELECT COUNT(*) AS c FROM messages WHERE keep_until = ?',
+        until).toArray()[0].c;
       const out = exportAs(all, {code:this.code, rule:room.rule,
         /* ★ 与消息时间同一个 UTC+8 格式化器：原来用 toISOString（UTC），
          *   同一份战报里"导出时间"与"消息时间"差 8 小时（真机反馈 · 第 6 条）。 */
-        exportedAt:ymdhm(Date.now()), renewed, keepUntil:until},
+        exportedAt:ymdhm(now), renewed, keepUntil:until,
+        /* ★ 有筛选才写这行：无筛选时 meta 里多一个空字段，渲染输出与 v1 逐字节一致
+         *   （19 条渲染快照就是靠这个保住的）。 */
+        filterText:hasFilters(filters) ? filterSummary(filters) : ''},
         (url.searchParams.get('format') === FORMAT.MD) ? FORMAT.MD : FORMAT.NDJSON);
       return new Response(out.body, {headers:{'content-type':out.type,
         'content-disposition':'attachment; filename="' + out.name + '"'}});

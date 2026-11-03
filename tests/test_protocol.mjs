@@ -733,7 +733,18 @@ console.log('== 25. ★★ 续期：导出/导入各续 30 天，接力链不断
   /* ★ 导出续期必须覆盖"已被续期救活的"：只判 ts 会漏掉它们，
    *   而接力链上正是这些老消息 —— 漏了就变成"导一次断一跳"。 */
   ok('★ 导出续期覆盖已被续活的老消息（ts 过期但 keep_until 未过）',
-    /UPDATE messages SET keep_until = \? WHERE ts >= \? OR keep_until > \?/.test(roomSrc));
+    /UPDATE messages SET keep_until = \? WHERE \(ts >= \? OR keep_until > \?\)/.test(roomSrc));
+  /* ★★ v1.1：筛选导出时，**导出的那批**和**续期的那批**必须是同一批。★★
+   * 只给 SELECT 加 clause、忘了 UPDATE，会出现"文件里没有、却给它续了命"（或反过来）。
+   * 【★ 一条摆设断言的教训】曾经连 COUNT 也拼了 clause，于是它数的是"筛出几条"而不是
+   *   "实际写进去几条" —— 把 UPDATE 的 clause 删掉后，战报头仍报 2、真跑仍绿。
+   *   先红后绿实测抓出来后改成下面两条：SELECT/UPDATE 必须同批，COUNT 必须按实际写入数。 */
+  ok('★ 导出的那批与续期的那批共用同一段筛选 clause',
+    /SELECT \* FROM messages WHERE 1 = 1' \+ clause/.test(roomSrc) &&
+    /UPDATE messages SET keep_until = \? WHERE \(ts >= \? OR keep_until > \?\)' \+ clause/.test(roomSrc));
+  ok('★ 续期条数按实际写入数统计，不跟着筛选条件数（否则"全房续命"会被骗过去）',
+    /SELECT COUNT\(\*\) AS c FROM messages WHERE keep_until = \?'/.test(roomSrc) &&
+    !/SELECT COUNT\(\*\) AS c FROM messages WHERE keep_until = \?' \+ clause/.test(roomSrc));
 
   /* ⑤ 可见痕迹：.status 与战报都要写，否则无法验证续期生效 */
   ok('★ .status 会显示"已续期至"', /keepUntil/.test(fs.readFileSync(path.join(ROOT, 'packages', 'engine', 'src', 'cmd.js'), 'utf8')));

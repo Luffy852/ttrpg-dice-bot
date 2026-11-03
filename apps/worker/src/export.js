@@ -12,6 +12,26 @@
  *   不需要把 total / 成功等级一起搬回去 —— 那正是副本漂移的来源。
  * ========================================================================== */
 import {renderBattleMd} from '../../../packages/engine/src/render-md.js';
+import {dayStart, dayEnd} from '../../../packages/protocol/src/export-filter.js';
+
+/* ★★ 导出筛选（v1.1）★★
+ * 【为什么下推到 SQL，不拉全表再在 JS 里 filter】
+ *   ① 导出的消息与**续期的消息必须是同一批** —— 两处各写一遍条件 = 迟早漂移，
+ *      出现"文件里没有、却给它续了命"（或反过来）这种最难查的错；
+ *   ② ts 本来就有 idx_messages_ts 索引，日期筛选能走索引；
+ *   ③ 房间最多几千条，内存过滤也不慢，但"同一段 WHERE"带来的确定性更值钱。
+ * 【为什么用参数绑定】昵称直接来自 URL，拼字符串 = SQL 注入。? 占位一个都不能少。
+ * 【空筛选】clause 为空 → SELECT 全量、UPDATE 全房，与 v1 行为逐字节一致。 */
+export function buildFilterClause(f){
+  const where = [], args = [];
+  if(f && f.from){ where.push('ts >= ?'); args.push(dayStart(f.from)); }
+  if(f && f.to){   where.push('ts <= ?'); args.push(dayEnd(f.to)); }
+  if(f && f.senders && f.senders.length){
+    where.push('from_name IN (' + f.senders.map(() => '?').join(',') + ')');
+    args.push(...f.senders);
+  }
+  return {clause:where.length ? (' AND ' + where.join(' AND ')) : '', args};
+}
 
 /** 全量 NDJSON：一行一条，字段与库表一致（回灌时直接 INSERT） */
 export function toNdjson(msgs){

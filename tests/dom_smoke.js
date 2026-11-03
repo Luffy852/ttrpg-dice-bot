@@ -493,7 +493,8 @@ function type(ui, net, text){
     await sleep(10);
     d.querySelectorAll('.mask .mbtn')[1].dispatchEvent(new w.Event('click'));
     await sleep(10);
-    ok('★ 选 NDJSON 得到 ndjson', picked_() === EXPORT_CHOICES[1].value, 'picked=' + JSON.stringify(picked_()));
+    ok('★ 选 NDJSON 得到 ndjson', !!picked_() && picked_().format === EXPORT_CHOICES[1].value,
+      'picked=' + JSON.stringify(picked_()));
 
     // ③ 点遮罩空白处 = 取消
     btnExport.dispatchEvent(new w.Event('click'));
@@ -510,6 +511,76 @@ function type(ui, net, text){
     ok('★ 连点导出不会叠两层弹窗', d.querySelectorAll('.mask').length === 1,
       'n=' + d.querySelectorAll('.mask').length);
     d.querySelector('.mask').remove();
+  }
+
+  /* ★★ 导出筛选 UI（v1.1）：必须走**生产的** ask.js + ui.askExport，不另写一份判断 ★★
+   * 【验什么】① 表单真的在弹窗里 ② 成员列表来自 ui.members() ③ 填的值真的进了 pick
+   *   ④ 日期写反就地报错、不关弹窗 ⑤ 带筛选时取消/Esc 仍然是取消
+   *   ⑥ 拼出来的 URL 带筛选参数、不带筛选时与 v1 一样。 */
+  {
+    const {buildExportQuery} = await import('../apps/web/src/ask.js');
+    const expBtn = d.getElementById('btn-export');
+    ui.setMembers([{anon_id:'a1', nick:'老王'}, {anon_id:'a2', nick:'小李'}], 2, 2);
+
+    expBtn.dispatchEvent(new w.Event('click'));
+    await sleep(10);
+    let mask = d.querySelector('.mask');
+    ok('★ 导出弹窗里有筛选表单', !!mask && !!mask.querySelector('.mfilters'));
+    ok('★ 有起止两个日期输入',
+      mask ? mask.querySelectorAll('.mfrow input[type="date"]').length === 2 : false);
+    const chips = mask ? [...mask.querySelectorAll('.mfchips .mfchip input')] : [];
+    ok('★ 参与者列出两个成员 + 骰娘/系统', chips.length === 3, 'n=' + chips.length);
+    ok('★ 成员 chip 的值是昵称（不是 anon_id）',
+      chips.slice(0, 2).map(c => c.value).join(',') === '老王,小李',
+      chips.map(c => c.value).join(','));
+    ok('★ 有「其他昵称」输入框（覆盖跨房间 / 已退出成员）',
+      !!mask && !!mask.querySelector('.mf-other'));
+    ok('★ 弹窗写明"留空 = 导出全部"', /留空/.test(mask ? mask.textContent : ''));
+
+    // ① 填范围 + 勾一个成员 + 手填一个昵称 → 选 Markdown
+    mask.querySelector('[data-f="from"]').value = '2026-11-01';
+    mask.querySelector('[data-f="to"]').value   = '2026-11-03';
+    chips[0].checked = true;
+    chips[0].dispatchEvent(new w.Event('change'));
+    mask.querySelector('.mf-other').value = '外来客，客串';
+    d.querySelectorAll('.mask .mbtn')[0].dispatchEvent(new w.Event('click'));
+    await sleep(10);
+    const p = picked_();
+    ok('★ 选 Markdown 得到 md', !!p && p.format === 'md', JSON.stringify(p));
+    ok('★ 日期真的进了 pick', !!p && p.filters.from === '2026-11-01' && p.filters.to === '2026-11-03',
+      JSON.stringify(p && p.filters));
+    ok('★ 勾选的昵称 + 手填的两个昵称都进了 pick',
+      !!p && JSON.stringify(p.filters.senders) === JSON.stringify(['老王', '外来客', '客串']),
+      JSON.stringify(p && p.filters.senders));
+    const url = p ? buildExportQuery({code:'123456', token:'tok-test',
+      format:p.format, filters:p.filters}) : '';
+    ok('★ 拼出的 URL 带 from / to / 三个 sender',
+      /from=2026-11-01/.test(url) && /to=2026-11-03/.test(url) &&
+      (url.match(/sender=/g) || []).length === 3, url);
+    ok('★ 弹窗关闭', !d.querySelector('.mask'));
+
+    // ② 日期写反：就地报错，不关弹窗、不导出
+    expBtn.dispatchEvent(new w.Event('click'));
+    await sleep(10);
+    mask = d.querySelector('.mask');
+    mask.querySelector('[data-f="from"]').value = '2026-11-03';
+    mask.querySelector('[data-f="to"]').value   = '2026-11-01';
+    d.querySelectorAll('.mask .mbtn')[0].dispatchEvent(new w.Event('click'));
+    await sleep(10);
+    ok('★ 起始晚于结束 → 弹窗不关闭', !!d.querySelector('.mask'));
+    ok('★ 起始晚于结束 → 就地显示错误',
+      /不能晚于/.test((d.querySelector('.mferr') || {}).textContent || ''),
+      (d.querySelector('.mferr') || {}).textContent);
+
+    // ③ 带筛选时按 Esc 仍 = 取消（弹窗底座共用，不能因为多了表单就走偏）
+    d.dispatchEvent(new w.KeyboardEvent('keydown', {key:'Escape'}));
+    await sleep(10);
+    /* ★ picked 在 ① 里已被设成对象；Esc 必须把它重新写回 null —— 这条不是"弹窗关了就算"，
+       而是真的验"带筛选时 Esc 没有偷偷把上一次的选择交出去"。 */
+    ok('★ 带筛选时 Esc = 取消（picked 回到 null）', picked_() === null,
+      'picked=' + JSON.stringify(picked_()));
+    ok('★ Esc 后弹窗关闭', !d.querySelector('.mask'));
+    ui.setMembers([], 0, 0);
   }
 
   /* ★ COC 卡的属性与派生值（2026-11-02 呈现修正）：真 DOM 里走完整链路
