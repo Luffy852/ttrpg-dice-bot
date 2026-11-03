@@ -3,7 +3,7 @@
 一个跑在网页上的多人 TRPG 掷骰房间。开一个 6 位房间号，把链接发给队友，
 大家在聊天框里打指令，服务端掷骰后把**同一份带明细的结果**广播给房间内所有人。
 
-**在线地址**：https://ttrpg-dice-bot.ylf-bob.workers.dev
+**在线地址**：https://dicebot.finewinginnovation.cn
 **状态**：v1 已完成开发并通过电脑 Chrome / iPhone / 安卓真机验收（2026-11-03）。
 
 ---
@@ -41,19 +41,7 @@ Durable Object（每房间一个实例，内置 SQLite）
 - **服务端权威掷骰**：客户端只发指令文本，随机源 `crypto.getRandomValues` 在服务端；同一 `req_id` 重发只掷一次。
 - **一份引擎两处跑**：`packages/engine`（纯 ESM、零 DOM 依赖）在浏览器与 Worker 中是同一份代码，靠 `apps/web/vendor/` 同步；`packages/protocol` 同理。
 - **只存事实、不存派生值**：消息 payload 存骰面与规则快照，合计 / 成功等级 / Hope-Fear 一律由 `replay.js` 现场推导。聊天流、详情、导出战报共用 `renderRoll()`。
-- **身份**：浏览器本地 `cid` → 服务端 `anon_id`；`PIN_SECRET` 只在 Cloudflare 网页端设置，不进仓库。
+- **身份**：浏览器本地 `cid` → 服务端 `anon_id`；`PIN_SECRET` 在 Cloudflare 网页端设置。
 - **时间统一 UTC+8**：服务端跑 UTC，展示与导出都走同一套时间函数。
 
 部署走 **GitHub 网页端推送 → Cloudflare Connect to Git 自动部署**，构建命令与根目录留空，由仓库根的 `wrangler.toml` 决定一切。
-
----
-
-## 文档
-
-| 文件 | 给谁 | 内容 |
-|---|---|---|
-| `docs/用户手册.md` | 你 | 部署与上传、逐项测试清单，全程网页点击、非技术语言 |
-| `docs/项目档案_在线多房间骰娘_v5.md` | 新对话 / 未来开发 | 项目唯一全局文档：需求、决策、历程、坑库、指令集、验收状态 |
-| `docs/archive/` | 备查 | 各阶段的历史文档，只读留痕，不再维护 |
-
-`legacy/M2_骰娘单机可摸版.html` 是 M2 单机版，同时也是**生成前端外壳与呈现类断言的构建输入**，请保留。
