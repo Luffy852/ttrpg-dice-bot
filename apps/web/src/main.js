@@ -124,8 +124,12 @@ function enter(r){
         if(r.from && r.from.length) msg += '（来自房间 ' + r.from.join(' / ') + '）';
         if(r.rescued) msg += '。其中 <b>' + r.rescued + '</b> 条原本已满 30 天，本次导入已给它们续期 30 天';
         if(r.cap) msg += '。<b>' + r.cap + '</b>';
-        ui.note(msg);
+        /* ★ 完成提示延后到首屏批次落地后再追加（见 ui.js noteLater）——
+         *   否则它会在 RELOAD 的 reset 之后插进空流，变成"最老"的一条，
+         *   往上翻一页还会被历史页顶到消息串中间（2026-11-02 真机截图）。 */
+        ui.noteLater(msg);
       }catch(e){
+        /* 失败提示必须即时：失败时不会有 resync 的首屏批次，延后 = 永远不显示 */
         ui.note('导入失败：' + (e.message || e));
       }
     },
@@ -155,7 +159,12 @@ function enter(r){
       },
       /* ★ 三种 batch 走三条路：first = 首屏（记锚点）/ page = 上翻（插顶部）/ live = 广播（追到底）。
        *   逻辑在 batch.js —— **生产与冒烟测试共用同一份**，不要再在这里另写一遍。 */
-      batch(msgs, cursor, hasMore, info){ applyBatch(ui, msgs, cursor, hasMore, info); },
+      batch(msgs, cursor, hasMore, info){
+        applyBatch(ui, msgs, cursor, hasMore, info);
+        /* ★ 首屏/重连批次落地后，把重载与导入完成的提示追加到**最新消息那一端**。
+         *   why 一律是 'first'（room.js 空房间也回一批），所以不会漏 flush。 */
+        if(info && info.why === 'first') ui.flushNotes();
+      },
       state(s){ ui.setRoom(s); },                    // ★ 以后端为准回写，不乐观更新
       /* ★ 房间里改名（.name）后，顶栏必须跟着变（真机反馈 · D 组第 3 条）
        * 【症状】.name 改完，服务端与 .status 已经是新昵称，但顶栏还是旧的 ——
@@ -167,7 +176,9 @@ function enter(r){
       reload(f){
         ui.reset();
         net.resync();
-        ui.note('有人导入了战报，房间消息已按时间重排（新增 <b>' + (f.imported || 0) +
+        /* ★ 延后显示：等 resync 的首屏批次落地后由 batch() 追加到最新消息之后，
+         *   而不是插进刚被清空的流里当"最老的一条"（再上拉一页就被顶到中间）。 */
+        ui.noteLater('有人导入了战报，房间消息已按时间重排（新增 <b>' + (f.imported || 0) +
           '</b> 条，共 <b>' + (f.total || 0) + '</b> 条）');
       },
       presence(list, online, total){

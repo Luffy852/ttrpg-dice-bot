@@ -23,6 +23,7 @@ export function createUI({code, onSubmit, onExport, onImport}){
   const $stream = $('stream'), $input = $('input'), $send = $('send');
   const seen = new Set();
   const pending = new Map();               // req_id → 占位气泡元素
+  const deferredNotes = [];                // ★ 等首屏批次落地后再追加到底部的系统提示
   const st = {rule:'generic', baredice:false, me:'玩家', members:[], code,
     online:0, total:0, msgTotal:null, seqAtWelcome:0};
 
@@ -325,6 +326,24 @@ export function createUI({code, onSubmit, onExport, onImport}){
       refreshTop();
     },
     note(html){ $stream.insertAdjacentHTML('beforeend', '<div class="notice">ⓘ ' + html + '</div>'); toBottom(); },
+    /* ★ 延后提示：整房重载 / 导入完成这类提示必须落在**最新消息那一端**（2026-11-02 真机反馈）。
+     * 【原来的坑】RELOAD 帧一到就 reset() 清空消息流，紧接着 note() 把提示插进空流 →
+     *   它成了"最老"的一条；等 resync 的首屏 200 条 append 在它后面，提示就钉在了最顶部。
+     *   用户再往上翻一页，prepend 的历史页又把它顶到消息串**中间**（真机截图正是这样）。
+     * 【做法】先暂存，等首屏批次落地后由 main.js 调 flushNotes() 追加到底部 ——
+     *   提示始终跟在最新消息后面，不参与历史页排序，也不会被上拉挤走。
+     * 【为什么 reset 不清这个队列】HTTP 回包可能比 RELOAD 广播先到，
+     *   若 reset 清空队列，"导入完成"那条提示会凭空消失。
+     * 【为什么不用超时兜底】net 重连 / 断线后发 HELLO，服务端一律回 why:'first' 的批次
+     *   （room.js 空房间也回一批），所以 flush 一定会被触发。 */
+    noteLater(html){ deferredNotes.push(html); },
+    flushNotes(){
+      if(!deferredNotes.length) return;
+      const html = deferredNotes.splice(0)
+        .map(h => '<div class="notice">ⓘ ' + h + '</div>').join('');
+      $stream.insertAdjacentHTML('beforeend', html);
+      toBottom();
+    },
     clear(){ seen.clear(); $stream.innerHTML = ''; },
     get count(){ return seen.size; },
   };
