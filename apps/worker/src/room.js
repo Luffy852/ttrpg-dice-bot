@@ -637,7 +637,10 @@ export class RoomDO extends DurableObject {
       this.sql.exec('UPDATE room SET notified_clean = 1 WHERE id = 1');
       this.broadcast({t:OUT.BATCH, msgs:[msg], cursor:base});
     }
-    /* ② 日常清理：只 DELETE（★ SQLite 删行不缩磁盘；VACUUM 锁库，只在 500M 全局触发时跑）
+    /* ② 日常清理：只 DELETE —— 2026-11-03 workerd 实测更正：
+     *   DO 的 sql.exec('VACUUM') 被隐式事务禁止、PRAGMA auto_vacuum 系列全部 SQLITE_AUTH，
+     *   且 DELETE 后 databaseSize 立即回落（6.16 MB → 8 KB，两轮复现）→ 不需要额外压缩，
+     *   500 MB 全局清理组件据此取消，改用 Cloudflare 原生账户级告警。
      * ★★ 双条件：满 30 天 **且** 没被续期。
      *   只判 ts 会把"刚续过期的老消息"删掉 —— 那正是用户主动保下来的内容，
      *   静默删掉等于这个功能没实现。 */

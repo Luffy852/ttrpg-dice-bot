@@ -6,14 +6,16 @@
  *   POST /api/room/:code/join       进房（PIN 房间校验；签发 token）
  *   GET  /api/room/:code/meta       房间信息（规则 / 成员 / 当前游标）
  *   GET  /api/room/:code/history    ws 不可用时的兜底拉取（cursor 增量）
- *   GET  /api/room/:code/export     导出（ndjson 全量 / md 战报）
+ *   GET  /api/room/:code/export     导出（ndjson / md 战报，可带 from / to / sender 筛选）
  *   GET  /ws/:code?token=           实时连接
  *   其它                            → 静态资源（apps/web）
  *
  * 【★ 两条不要发挥】
  *   ① 房间号是 6 位数字，**必然可枚举**（10⁶）—— 开放房间靠"号码不公开"这一层。
  *      这是已定决策（Q26 定了 6 位、PIN 是主防护），不要再改成长随机码。
- *   ② 全局 500M 清理不在这里 —— DO 之间无全局视图，需要 KV 索引 + Cron（阶段 4 的 cron.js）。
+ *   ② 全局清理不在这里 —— DO 之间无全局视图。2026-11-03 实测后**取消自建 KV + Cron**：
+ *      VACUUM 在 DO 上被隐式事务禁止、DELETE 后 databaseSize 立即回落，
+ *      且自建方案只看得见本应用。改用 Cloudflare 原生 Alerts 对账户级 5 GB 告警。
  * ========================================================================== */
 import {RoomDO} from './room.js';
 import {newCode, isCode, isPin, signToken} from './auth.js';

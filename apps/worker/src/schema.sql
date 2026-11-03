@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS room (
   id           INTEGER PRIMARY KEY CHECK (id = 1),
   code         TEXT    NOT NULL,           -- 6 位数字房间号
   created_at   INTEGER NOT NULL,           -- 惰性撞号检测读它（不存在或已过期即占用成功）
-  last_active  INTEGER NOT NULL,           -- 500M 全局清理的排序键
+  last_active  INTEGER NOT NULL,           -- 最后活动（巡检 / 观察用；500M 清理已取消，改平台告警）
   rule         TEXT    NOT NULL DEFAULT 'generic',
   baredice     INTEGER NOT NULL DEFAULT 0,
   rule_set_by  TEXT,
