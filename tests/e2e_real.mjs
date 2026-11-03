@@ -273,6 +273,12 @@ const B = await createRoom();
   await sleep(500);
   ok('J5d 导入后所有人收到 RELOAD（不只是导入者）', cb.reloads > 0 && cb2.reloads > 0,
     'cb=' + cb.reloads + ' cb2=' + cb2.reloads);
+  /* ★ 2026-11-02 真机反馈 · 第 3 条：广播必须写明**是谁**导入的，
+   *   而且用的是导入者（阿己）的权威昵称，不是各自客户端的昵称。 */
+  const rf1 = cb.frames.find(f => f.t === 'reload');
+  const rf2 = cb2.frames.find(f => f.t === 'reload');
+  ok('★ RELOAD 带 by 字段（写明导入者）', !!rf1 && rf1.by === '阿己', JSON.stringify(rf1));
+  ok('★ 另一个客户端看到的也是导入者本人（不是自己）', !!rf2 && rf2.by === '阿己', JSON.stringify(rf2));
 
   // 重排后：A 来的消息（时间更早）应排在 B 自己的消息之前
   cb.frames = [];
@@ -286,9 +292,16 @@ const B = await createRoom();
     'idxA=' + idxA + ' idxB=' + idxB);
   ok('J6b 重排后 seq 仍单调递增', all.every((m, i) => i === 0 || m.seq > all[i - 1].seq));
 
+  /* ★ 重复导入（imported=0）服务端**不广播 RELOAD**（没有新增就没有重排）。
+   *   这正是真机"卡在正在导入…"的根因：前端把完成提示一律延后到首屏批次才显示，
+   *   而这一条路径根本不会有首屏批次。锁住服务端这个行为，前端分流才有依据。 */
+  cb.frames = [];
   const r2 = await apiImport(B.code, jb.token, shifted);
+  await sleep(400);
   eq('J6d 重复导入不翻倍', r2.imported, 0);
   ok('J6d 重复导入提示跳过', r2.skipped > 0, JSON.stringify(r2));
+  ok('★ 重复导入不广播 RELOAD（前端才会走即时提示分支）',
+    !cb.frames.find(f => f.t === 'reload'), JSON.stringify(cb.frames.map(f => f.t)));
 
   const after = await cb.cmd('.r 1d20');
   ok('J6e 导入后继续发指令正常', !!after, JSON.stringify(after && after.kind));

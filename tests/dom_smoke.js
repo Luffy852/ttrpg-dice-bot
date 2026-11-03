@@ -576,6 +576,45 @@ function type(ui, net, text){
       /status:r\.status/.test(gw));
   }
 
+  /* ★ 2026-11-02 真机反馈（导入第 2 轮）：重复导入 / 谁导入的 / 来源标注位置
+   * 【为什么是源码断言】onImport 依赖 gate / fetch / room 对象，jsdom 里跑不完整请求链路；
+   *   服务端那条由 e2e_real 真跑（RELOAD 帧的 by 字段），这里锁前端接线。 */
+  {
+    const main = fs.readFileSync(path.join(__dirname, '../apps/web/src/main.js'), 'utf8');
+    const ui = fs.readFileSync(path.join(__dirname, '../apps/web/src/ui.js'), 'utf8');
+    const room = fs.readFileSync(path.join(__dirname, '../apps/worker/src/room.js'), 'utf8');
+
+    // ① 反馈 1：重复导入（0 新增）不广播 RELOAD，完成提示必须即时显示，不能卡在"正在导入…"
+    ok('★ imported=0 走即时 note（不再等永远不会来的首屏批次）',
+      /if\(r\.imported === 0\) ui\.note\(msg\)/.test(main) &&
+      /else ui\.noteLater\(msg\)/.test(main));
+    ok('★ noteLater 有超时兜底（RELOAD 帧丢了也不吞提示）',
+      /deferTimer = setTimeout\(flushNotes, 2500\)/.test(ui) &&
+      /function flushNotes\(\)/.test(ui) &&
+      /flushNotes,/.test(ui));
+    ok('★ 服务端 0 新增时确实不广播 RELOAD（前端分流的依据）',
+      /if\(!plan\.add\.length\) return Response\.json\(\{imported:0/.test(room) &&
+      !/if\(!plan\.add\.length\)[\s\S]{0,300}broadcast/.test(room));
+
+    // ② 反馈 3a：广播写明是谁，且昵称要转义
+    ok('★ RELOAD 广播带 by（按 token 查 members 的权威昵称）',
+      /SELECT nick FROM members WHERE anon_id = \?/.test(room) &&
+      /imported:plan\.add\.length, total, by/.test(room));
+    ok('★ 前端用 f.by 显示导入者，且走 escTxt 转义',
+      /f\.by \? '<b>' \+ escTxt\(f\.by\)/.test(main) &&
+      /const escTxt = s =>/.test(main));
+    ok('★ 旧服务端没有 by 时退回「有人」，不显示 undefined',
+      /: '有人'/.test(main));
+
+    // ③ 反馈 3b：来自房间紧跟"新增 N 条"，不在整句末尾
+    ok('★「来自房间」紧跟新增条数（不再挂在整句末尾）',
+      /新增 <b>' \+ r\.imported \+ '<\/b> 条' \+\s*\n\s*\(r\.from && r\.from\.length/.test(main) &&
+      !/已按时间重排';\s*\n\s*if\(r\.from/.test(main));
+    ok('★ 房间号也走 escTxt', /r\.from\.map\(escTxt\)/.test(main));
+    ok('★ 0 新增时不再谎称「已按时间重排」',
+      /r\.imported > 0 \? '，已按时间重排' : '，无新增，消息顺序未变'/.test(main));
+  }
+
   /* ★ .help 的「当前规则」：规则名只在小标题里，不再单独重复一行、也不再出现"规则键"
    * 【为什么这条要断言】F 组把"规则键"从 .status 里删掉了，help 里漏了一处 ——
    *   这是典型的"横切决策只落实一处"。规则键（dnd5r）是机器标识，对玩家没有意义。 */

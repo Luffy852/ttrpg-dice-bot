@@ -365,8 +365,20 @@ export class RoomDO extends DurableObject {
       const rescued = plan.add.filter(m => m.ts < cut).length;
       /* ★ 顺序变了 → 所有人的游标与本地去重集合全部失效，必须整房重载。
        *   不广播的话：自己刷新看得到新顺序，别人要等下一条指令才被"挤"出来，
-       *   期间每个人看到的顺序都不一样 —— 那种不一致最难排查。 */
-      this.broadcast({t:OUT.RELOAD, code:this.code, imported:plan.add.length, total});
+       *   期间每个人看到的顺序都不一样 —— 那种不一致最难排查。
+       * 【★ 带上是谁导入的（2026-11-02 真机反馈 · 第 3 条）】广播是给**全房**看的，
+       *   "有人导入了战报"对其他人毫无信息量 —— 不知道该谢谁、该问谁。
+       *   token 里带着 anon_id（join 时签发），按它查 members 拿的是**服务端权威昵称**，
+       *   不信客户端传参；查不到（旧 token / 成员记录被清）就退回"某位玩家"。 */
+      let by = '某位玩家';
+      try{
+        const a = v.payload && v.payload.anon_id;
+        if(a){
+          const row = this.sql.exec('SELECT nick FROM members WHERE anon_id = ?', a).toArray()[0];
+          if(row && row.nick) by = String(row.nick);
+        }
+      }catch(e){ /* 查不到就保持兜底，广播不能因为查昵称而失败 */ }
+      this.broadcast({t:OUT.RELOAD, code:this.code, imported:plan.add.length, total, by});
       return Response.json({imported:plan.add.length, skipped:plan.skipped, errors:parsed.errs,
         total, rescued, from:srcRoomsOf(plan.add), cap:capNote(total)});
     }

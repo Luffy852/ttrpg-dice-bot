@@ -13,6 +13,11 @@ import {createUI} from './ui.js';
 import {pickExportFormat} from './ask.js';
 
 const $ = id => document.getElementById(id);
+/* ★ 服务端广播来的昵称 / 房间号要拼进 innerHTML 的提示里，必须转义。
+ * 【为什么不用 ui.js 里的 Engine.esc】那是页面全局注入的引擎对象，main.js 不走模块图；
+ *   这里只转义提示里的两三个短字段，不渲染消息，不算"同一份渲染写两遍"。 */
+const escTxt = s => String(s == null ? '' : s).replace(/[&<>"']/g,
+  c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c]));
 const store = {
   get(k){ try{ return sessionStorage.getItem(k); }catch(e){ return null; } },
   set(k, v){ try{ sessionStorage.setItem(k, v); }catch(e){} },
@@ -117,17 +122,27 @@ function enter(r){
          *   都会在这里变成明确的「导入失败：…」，而不是渲染出「新增 undefined 条」。 */
         if(typeof r.imported !== 'number' || typeof r.total !== 'number')
           throw new Error(r.error || r.note || '服务端回包不完整（缺 imported / total）');
+        /* ★「来自房间 X」紧跟在「新增 N 条」后面（2026-11-02 真机反馈 · 第 3 条）——
+         *   原来挂在整句末尾，读起来像是整段话的注脚，其实它修饰的是"这 N 条"。 */
         let msg = '导入完成：新增 <b>' + r.imported + '</b> 条' +
+          (r.from && r.from.length
+            ? '（来自房间 ' + r.from.map(escTxt).join(' / ') + '）' : '') +
           (r.skipped ? ('，跳过已存在的 ' + r.skipped + ' 条') : '') +
           (r.errors && r.errors.length ? ('，<b>' + r.errors.length + ' 行无法解析</b>') : '') +
-          '。房间现有 ' + r.total + ' 条，已按时间重排';
-        if(r.from && r.from.length) msg += '（来自房间 ' + r.from.join(' / ') + '）';
+          '。房间现有 ' + r.total + ' 条' +
+          /* ★ 0 新增时服务端根本没重排（真机反馈 · 第 2 点），原来照样写"已按时间重排"，
+           *   与"没强制刷新"的实际现象矛盾，容易让人以为提示在撒谎。 */
+          (r.imported > 0 ? '，已按时间重排' : '，无新增，消息顺序未变');
         if(r.rescued) msg += '。其中 <b>' + r.rescued + '</b> 条原本已满 30 天，本次导入已给它们续期 30 天';
-        if(r.cap) msg += '。<b>' + r.cap + '</b>';
-        /* ★ 完成提示延后到首屏批次落地后再追加（见 ui.js noteLater）——
-         *   否则它会在 RELOAD 的 reset 之后插进空流，变成"最老"的一条，
-         *   往上翻一页还会被历史页顶到消息串中间（2026-11-02 真机截图）。 */
-        ui.noteLater(msg);
+        if(r.cap) msg += '。<b>' + escTxt(r.cap) + '</b>';
+        /* ★ 2026-11-02 真机回归修复：重复导入（imported=0）时服务端**不广播 RELOAD**
+         *   （没有新增就没有重排，这是对的），也就不会有 why:'first' 的首屏批次来 flush 队列 ——
+         *   上一版把完成提示一律改成 noteLater，结果界面永远停在"正在导入…"，
+         *   还要等下一次"有新增"的导入才把两条提示一起放出来（真机截图 2）。
+         * 【分流】有新增 → 延后（等 RELOAD 的首屏批次落地后追加到底部，位置才对）；
+         *   零新增 → 即时 note（页面没被 reset，直接追加到底部就是正确位置）。 */
+        if(r.imported === 0) ui.note(msg);
+        else ui.noteLater(msg);
       }catch(e){
         /* 失败提示必须即时：失败时不会有 resync 的首屏批次，延后 = 永远不显示 */
         ui.note('导入失败：' + (e.message || e));
@@ -177,8 +192,11 @@ function enter(r){
         ui.reset();
         net.resync();
         /* ★ 延后显示：等 resync 的首屏批次落地后由 batch() 追加到最新消息之后，
-         *   而不是插进刚被清空的流里当"最老的一条"（再上拉一页就被顶到中间）。 */
-        ui.noteLater('有人导入了战报，房间消息已按时间重排（新增 <b>' + (f.imported || 0) +
+         *   而不是插进刚被清空的流里当"最老的一条"（再上拉一页就被顶到中间）。
+         * 【★ 写明是谁（2026-11-02 真机反馈 · 第 3 条）】by 是服务端从 token 查 members 得到的
+         *   权威昵称；旧版服务端没有这个字段时退回"有人"，不至于显示 undefined。 */
+        const who = f.by ? '<b>' + escTxt(f.by) + '</b>' : '有人';
+        ui.noteLater(who + ' 导入了战报，房间消息已按时间重排（新增 <b>' + (f.imported || 0) +
           '</b> 条，共 <b>' + (f.total || 0) + '</b> 条）');
       },
       presence(list, online, total){
