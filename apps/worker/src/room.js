@@ -19,7 +19,7 @@ import {createRoomCore} from './core.js';
 import {checkIn, IN, ERR, OUT} from '../../../packages/protocol/src/frames.js';
 import {exportAs, FORMAT, fromNdjson} from './export.js';
 import {planImport, mergeOrder} from './core.js';
-import {ymdhm} from '../../../packages/engine/src/util.js';
+import {ymdhm, esc} from '../../../packages/engine/src/util.js';
 import {verifyToken, verifyPin, newSalt, hashPin, signToken, TOKEN_TTL} from './auth.js';
 
 const DAY = 86400000;
@@ -350,26 +350,19 @@ export class RoomDO extends DurableObject {
       let body = {};
       try{ body = await req.json(); }catch(e){ return Response.json({error:'bad_body'}, {status:400}); }
       const parsed = fromNdjson(String(body.text || ''));
-      if(!parsed.msgs.length) return Response.json({imported:0, skipped:0, errors:parsed.errs,
-        total:await this.storage().countMsgs(), note:'没有可导入的消息'});
       const plan = await planImport(this.storage(), parsed.msgs);
-      if(!plan.add.length) return Response.json({imported:0, skipped:plan.skipped,
-        errors:parsed.errs, total:await this.storage().countMsgs(), note:'这些消息已经在房间里了'});
-      try{ await this.storage().reflow(plan); }
-      catch(e){ return Response.json({error:'write_failed', why:String(e.message || e)}, {status:500}); }
-
-      const total = await this.storage().countMsgs();
+      const added = plan.add.length;
+      const from = srcRoomsOf(plan.add);
       /* ★ 导入即续期后，"已满 30 天"不再是要被删的意思 —— 它会被续上 30 天。
        *   这里报的是**续期前已经过期**的条数，让用户知道有多少是靠本次续期救回来的。 */
       const cut = Date.now() - KEEP_DAYS * DAY;
-      const rescued = plan.add.filter(m => m.ts < cut).length;
+      const rescued = added ? plan.add.filter(m => m.ts < cut).length : 0;
+
       /* ★ 顺序变了 → 所有人的游标与本地去重集合全部失效，必须整房重载。
        *   不广播的话：自己刷新看得到新顺序，别人要等下一条指令才被"挤"出来，
        *   期间每个人看到的顺序都不一样 —— 那种不一致最难排查。
-       * 【★ 带上是谁导入的（2026-11-02 真机反馈 · 第 3 条）】广播是给**全房**看的，
-       *   "有人导入了战报"对其他人毫无信息量 —— 不知道该谢谁、该问谁。
-       *   token 里带着 anon_id（join 时签发），按它查 members 拿的是**服务端权威昵称**，
-       *   不信客户端传参；查不到（旧 token / 成员记录被清）就退回"某位玩家"。 */
+       * 【★ 带上是谁导入的（2026-11-02 真机反馈）】token 里的 anon_id 查 members 拿
+       *   **服务端权威昵称**，不信客户端传参；查不到就退回"某位玩家"。 */
       let by = '某位玩家';
       try{
         const a = v.payload && v.payload.anon_id;
@@ -378,9 +371,47 @@ export class RoomDO extends DurableObject {
           if(row && row.nick) by = String(row.nick);
         }
       }catch(e){ /* 查不到就保持兜底，广播不能因为查昵称而失败 */ }
-      this.broadcast({t:OUT.RELOAD, code:this.code, imported:plan.add.length, total, by});
-      return Response.json({imported:plan.add.length, skipped:plan.skipped, errors:parsed.errs,
-        total, rescued, from:srcRoomsOf(plan.add), cap:capNote(total)});
+
+      if(added){
+        try{ await this.storage().reflow(plan); }
+        catch(e){ return Response.json({error:'write_failed', why:String(e.message || e)}, {status:500}); }
+      }
+
+      /* ★★ 2026-11-03 真机反馈：导入提示必须**长期留存**（像裸骰识别提示一样）。★★
+       * 【原来的问题】"导入完成 / 谁导入了战报"是前端 ui.note() 插进 DOM 的临时节点，
+       *   刷新页面就从消息流里消失（对比截图 1 / 2）—— 而 ".set baredice" 的提示是
+       *   core.apply 产出的 kind:'notice' **真实消息**，落在 messages 表、能回放、能导出。
+       * 【做法】照抄闹钟提醒那条现成链路（本文件 alarm 里 allocSeq + insertMsgs + broadcast）：
+       *   导入结束后写一条 kind:'notice' 进消息表，文案合并原先"广播 + 完成回执"两条。
+       *   它带 ts=now、seq 最大 → 永远排在最新消息那一端，上翻多少页都不会被挤到中间；
+       *   RELOAD 后 resync 首屏会把它带回来，刷新/换设备/导出战报都看得到。
+       * 【口径】0 新增也留一条（不重排、不 RELOAD，只 live 追加一条 BATCH）——
+       *   每次导入都是一次房间操作，与"每按一次 .set baredice 留一条"一致。
+       * 【安全】html 最终会广播给全房并 innerHTML 渲染，昵称 / 房间号一律 esc。 */
+      const total = await this.storage().countMsgs() + 1;   // +1 = 即将写入的这条提示
+      const html = '<b>' + esc(by) + '</b> 导入了战报：新增 <b>' + added + '</b> 条' +
+        (from.length ? '（来自房间 ' + from.map(x => esc(String(x))).join(' / ') + '）' : '') +
+        (plan.skipped ? '，跳过已存在的 ' + plan.skipped + ' 条' : '') +
+        (parsed.errs && parsed.errs.length ? '，<b>' + parsed.errs.length + ' 行无法解析</b>' : '') +
+        '。房间现有 ' + total + ' 条' +
+        (added ? '，已按时间重排' : '，无新增，消息顺序未变') +
+        (rescued ? '。其中 <b>' + rescued + '</b> 条原本已满 30 天，本次导入已给它们续期 30 天' : '') +
+        (capNote(total) ? '。<b>' + esc(capNote(total)) + '</b>' : '');
+      const seq = await this.storage().allocSeq(1);
+      const rm = await this.storage().getRoom();
+      const notice = {seq, id:this.code + ':' + seq, ts:Date.now(), kind:'notice',
+        from:'骰娘', actor:null, anon_id:null, req_id:null, rule_at:(rm && rm.rule) || 'generic',
+        payload:{html}};
+      await this.storage().insertMsgs([notice]);
+      if(added){
+        /* 顺序重排 → 整房 reload；新写的提示会随 resync 首屏一起回来 */
+        this.broadcast({t:OUT.RELOAD, code:this.code, imported:added, total, by});
+      }else{
+        /* 没重排 → 不强制刷新（用户已定口径），只把这条提示 live 追加给在线的人 */
+        this.broadcast({t:OUT.BATCH, msgs:[notice], cursor:seq});
+      }
+      return Response.json({imported:added, skipped:plan.skipped, errors:parsed.errs,
+        total, rescued, from, cap:capNote(total)});
     }
 
     if(url.pathname === '/export'){

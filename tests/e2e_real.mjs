@@ -228,14 +228,22 @@ const P = await createRoom();
   const fb = cp.firstBatch();
   const first = (fb && fb.msgs) || [];
   eq('J1a 首屏是最近的 200 条', first.length, 200);
-  ok('J1a 首屏最后一条是最新消息', /第 210 条/.test(JSON.stringify(first[first.length - 1]?.payload || {})));
+  /* ★ 2026-11-03 起每次导入都会额外写一条**持久化提示**（kind:notice，ts=now），
+   *   所以房间共 211 条：首屏最后一条是那条提示，倒数第二条才是"第 210 条"。
+   *   这不是上翻坏了 —— 恰恰说明提示是真实消息、能回放。 */
+  ok('J1a 首屏最后一条是导入提示（真实消息，不是本地 DOM）',
+    first[first.length - 1]?.kind === 'notice' &&
+    /导入了战报/.test(String((first[first.length - 1]?.payload || {}).html || '')),
+    JSON.stringify(first[first.length - 1]?.payload || {}).slice(0, 120));
+  ok('J1a 提示前一条是最新的第 210 条',
+    /第 210 条/.test(JSON.stringify(first[first.length - 2]?.payload || {})));
   const oldest = first[0].seq;
   cp.frames = [];
   cp.page(oldest);
   await cp.waitFor('batch', 5000);
   const page2 = (cp.frames.find(f => f.t === 'batch' && f.why === 'page') || {}).msgs || [];
   const f2 = cp.frames.find(f => f.t === 'batch' && f.why === 'page');
-  eq('J1c 上翻取到更早的 10 条', page2.length, 10);
+  eq('J1c 上翻取到更早的 11 条（210 老消息 + 1 条导入提示 = 211）', page2.length, 11);
   ok('J1c 上翻到顶后 has_more=false', f2 && f2.has_more === false, JSON.stringify(f2 && { has_more: f2.has_more, oldest: f2.oldest }));
   ok('J1d 上翻内容是更早的（第 1 条起）', /第 1 条/.test(JSON.stringify(page2[0]?.payload || {})));
   const seqs = first.map(m => m.seq);
@@ -292,16 +300,40 @@ const B = await createRoom();
     'idxA=' + idxA + ' idxB=' + idxB);
   ok('J6b 重排后 seq 仍单调递增', all.every((m, i) => i === 0 || m.seq > all[i - 1].seq));
 
-  /* ★ 重复导入（imported=0）服务端**不广播 RELOAD**（没有新增就没有重排）。
-   *   这正是真机"卡在正在导入…"的根因：前端把完成提示一律延后到首屏批次才显示，
-   *   而这一条路径根本不会有首屏批次。锁住服务端这个行为，前端分流才有依据。 */
+  /* ★ 0 新增：不 reflow、不 RELOAD（用户已定口径：没重排就不强制刷新整房），
+   *   但仍写一条持久化 notice 并以 live BATCH 追加给在线的人。 */
   cb.frames = [];
   const r2 = await apiImport(B.code, jb.token, shifted);
   await sleep(400);
   eq('J6d 重复导入不翻倍', r2.imported, 0);
   ok('J6d 重复导入提示跳过', r2.skipped > 0, JSON.stringify(r2));
-  ok('★ 重复导入不广播 RELOAD（前端才会走即时提示分支）',
+  ok('★ 0 新增不广播 RELOAD（不强制刷新整房）',
     !cb.frames.find(f => f.t === 'reload'), JSON.stringify(cb.frames.map(f => f.t)));
+  ok('★ 0 新增仍 live 追加一条 notice（每次导入都留痕）',
+    cb.frames.some(f => f.t === 'batch' && (f.msgs || []).some(m =>
+      m.kind === 'notice' && /导入了战报/.test(String((m.payload || {}).html || '')))),
+    JSON.stringify(cb.frames.map(f => f.t)));
+
+  /* ★★ 2026-11-03 真机反馈：导入提示要像裸骰提示一样**长期留存** ★★
+   * 新开一个 ws 客户端 = 用户按 F5 刷新；首屏 recent(200) 里必须还能看到那两条 notice。
+   * 这是"落库的真实消息" vs "前端临时 DOM 节点"最直接的分界线。 */
+  const refreshed = new Client(B.code, jb.token, 'refresh');
+  await refreshed.open();
+  await refreshed.waitFor('batch', 5000);
+  await sleep(200);
+  const rb = refreshed.firstBatch();
+  const notices = ((rb && rb.msgs) || []).filter(m => m.kind === 'notice' &&
+    /导入了战报/.test(String((m.payload || {}).html || '')));
+  ok('★ 刷新后导入提示仍在（已落库回放，不再是临时 DOM）', notices.length >= 2,
+    'count=' + notices.length);
+  const h0 = String((notices[0] && notices[0].payload && notices[0].payload.html) || '');
+  ok('★ 提示里写明导入者（阿己，服务端权威昵称）', /阿己/.test(h0), h0.slice(0, 180));
+  ok('★「（来自房间 X）」紧跟新增条数', /新增 <b>\d+<\/b> 条（来自房间 \d{6}）/.test(h0),
+    h0.slice(0, 180));
+  ok('★ 0 新增那条写「无新增，消息顺序未变」',
+    notices.some(n => /无新增，消息顺序未变/.test(String((n.payload || {}).html || ''))));
+  /* ★ 提示本身也走导出（与裸骰提示一致），下一轮 J7 接力会顺带验证它不破坏格式 */
+  refreshed.close();
 
   const after = await cb.cmd('.r 1d20');
   ok('J6e 导入后继续发指令正常', !!after, JSON.stringify(after && after.kind));
@@ -314,8 +346,14 @@ const B = await createRoom();
   const C = await createRoom();
   const jc = await join(C.code, '阿辛', CID_C);
   const exB = await apiExport(B.code, jb.token, 'ndjson');
+  /* ★ 持久化提示也要能进战报、能被再导回来（与裸骰提示同款），不能成为格式黑洞 */
+  ok('★ 导入提示出现在 ndjson 战报里（可导出）',
+    exB.text.split('\n').some(l => /"kind":"notice"/.test(l) && /导入了战报/.test(l)),
+    exB.text.split('\n').filter(l => /导入了战报/.test(l)).slice(0, 1).join('').slice(0, 180));
   const r3 = await apiImport(C.code, jc.token, exB.text);
   ok('J7c B→C 接力成功', r3.imported > 0, JSON.stringify(r3));
+  ok('★ 带 notice 的战报再导入没有解析错误',
+    !(r3.errors && r3.errors.length), JSON.stringify(r3.errors || []));
   ok('J7c C 里老消息仍标最初的 A（不是 B）',
     JSON.stringify(r3.from).indexOf(A.code) >= 0, JSON.stringify(r3.from));
 

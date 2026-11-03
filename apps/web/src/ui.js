@@ -23,8 +23,6 @@ export function createUI({code, onSubmit, onExport, onImport}){
   const $stream = $('stream'), $input = $('input'), $send = $('send');
   const seen = new Set();
   const pending = new Map();               // req_id → 占位气泡元素
-  const deferredNotes = [];                // ★ 等首屏批次落地后再追加到底部的系统提示
-  let deferTimer = null;                   // ★ 兜底：RELOAD 帧丢了也要把暂存提示放出来
   const st = {rule:'generic', baredice:false, me:'玩家', members:[], code,
     online:0, total:0, msgTotal:null, seqAtWelcome:0};
 
@@ -303,17 +301,6 @@ export function createUI({code, onSubmit, onExport, onImport}){
   });
   $input.addEventListener('blur', fit);
 
-  /* 内部函数（不是对象方法）：noteLater 的兜底 timer 要能直接调它，
-   * 也供 main.js 在 why:'first' 的批次落地后经 ui.flushNotes() 调用。 */
-  function flushNotes(){
-    clearTimeout(deferTimer); deferTimer = null;
-    if(!deferredNotes.length) return;
-    const html = deferredNotes.splice(0)
-      .map(h => '<div class="notice">ⓘ ' + h + '</div>').join('');
-    $stream.insertAdjacentHTML('beforeend', html);
-    toBottom();
-  }
-
   return {
     append, prepend, appendPending, failPending, failAll, refreshTop, toBottom,
     setPaging, doneLoadingOlder, onLoadOlder, reset, askChoice,
@@ -337,27 +324,11 @@ export function createUI({code, onSubmit, onExport, onImport}){
       else st.total = st.members.length;
       refreshTop();
     },
+    /* ★ note 只用于**临时的本地反馈**（"正在导入…" / 连接状态 / 读文件失败）。
+     *   2026-11-03 起，导入结果改由服务端写 kind:'notice' 的真实消息落库并广播，
+     *   刷新后仍在；原来那些 noteLater / flushNotes 延后队列因此整套删掉 ——
+     *   提示成了最新 seq 的真实消息，天然在消息流最末端，不需要前端再操心位置。 */
     note(html){ $stream.insertAdjacentHTML('beforeend', '<div class="notice">ⓘ ' + html + '</div>'); toBottom(); },
-    flushNotes,
-    /* ★ 延后提示：整房重载 / 导入完成这类提示必须落在**最新消息那一端**（2026-11-02 真机反馈）。
-     * 【原来的坑】RELOAD 帧一到就 reset() 清空消息流，紧接着 note() 把提示插进空流 →
-     *   它成了"最老"的一条；等 resync 的首屏 200 条 append 在它后面，提示就钉在了最顶部。
-     *   用户再往上翻一页，prepend 的历史页又把它顶到消息串**中间**（真机截图正是这样）。
-     * 【做法】先暂存，等首屏批次落地后由 main.js 调 flushNotes() 追加到底部 ——
-     *   提示始终跟在最新消息后面，不参与历史页排序，也不会被上拉挤走。
-     * 【为什么 reset 不清这个队列】HTTP 回包可能比 RELOAD 广播先到，
-     *   若 reset 清空队列，"导入完成"那条提示会凭空消失。
-     * 【★ 2026-11-02 修正】上一版写了"flush 一定会被触发"，这是**错的**：
-     *   重复导入同一份战报（imported=0）时服务端**不广播 RELOAD**（没有重排，本就不该刷），
-     *   于是没有 why:'first' 的批次 → 队列永远不 flush → 界面停在"正在导入…"不动。
-     *   现在两道保险：① main.js 对 imported=0 直接走即时 note（不进队列）
-     *   ② 这里给 noteLater 加超时兜底，万一 RELOAD 帧丢失也不会把提示吞掉。 */
-    noteLater(html){
-      deferredNotes.push(html);
-      clearTimeout(deferTimer);
-      /* 每次入队重置计时：RELOAD 帧到达时也会 noteLater 一条，相当于给首屏批次续了时间 */
-      deferTimer = setTimeout(flushNotes, 2500);
-    },
     clear(){ seen.clear(); $stream.innerHTML = ''; },
     get count(){ return seen.size; },
   };

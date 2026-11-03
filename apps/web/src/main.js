@@ -13,11 +13,6 @@ import {createUI} from './ui.js';
 import {pickExportFormat} from './ask.js';
 
 const $ = id => document.getElementById(id);
-/* ★ 服务端广播来的昵称 / 房间号要拼进 innerHTML 的提示里，必须转义。
- * 【为什么不用 ui.js 里的 Engine.esc】那是页面全局注入的引擎对象，main.js 不走模块图；
- *   这里只转义提示里的两三个短字段，不渲染消息，不算"同一份渲染写两遍"。 */
-const escTxt = s => String(s == null ? '' : s).replace(/[&<>"']/g,
-  c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c]));
 const store = {
   get(k){ try{ return sessionStorage.getItem(k); }catch(e){ return null; } },
   set(k, v){ try{ sessionStorage.setItem(k, v); }catch(e){} },
@@ -122,27 +117,14 @@ function enter(r){
          *   都会在这里变成明确的「导入失败：…」，而不是渲染出「新增 undefined 条」。 */
         if(typeof r.imported !== 'number' || typeof r.total !== 'number')
           throw new Error(r.error || r.note || '服务端回包不完整（缺 imported / total）');
-        /* ★「来自房间 X」紧跟在「新增 N 条」后面（2026-11-02 真机反馈 · 第 3 条）——
-         *   原来挂在整句末尾，读起来像是整段话的注脚，其实它修饰的是"这 N 条"。 */
-        let msg = '导入完成：新增 <b>' + r.imported + '</b> 条' +
-          (r.from && r.from.length
-            ? '（来自房间 ' + r.from.map(escTxt).join(' / ') + '）' : '') +
-          (r.skipped ? ('，跳过已存在的 ' + r.skipped + ' 条') : '') +
-          (r.errors && r.errors.length ? ('，<b>' + r.errors.length + ' 行无法解析</b>') : '') +
-          '。房间现有 ' + r.total + ' 条' +
-          /* ★ 0 新增时服务端根本没重排（真机反馈 · 第 2 点），原来照样写"已按时间重排"，
-           *   与"没强制刷新"的实际现象矛盾，容易让人以为提示在撒谎。 */
-          (r.imported > 0 ? '，已按时间重排' : '，无新增，消息顺序未变');
-        if(r.rescued) msg += '。其中 <b>' + r.rescued + '</b> 条原本已满 30 天，本次导入已给它们续期 30 天';
-        if(r.cap) msg += '。<b>' + escTxt(r.cap) + '</b>';
-        /* ★ 2026-11-02 真机回归修复：重复导入（imported=0）时服务端**不广播 RELOAD**
-         *   （没有新增就没有重排，这是对的），也就不会有 why:'first' 的首屏批次来 flush 队列 ——
-         *   上一版把完成提示一律改成 noteLater，结果界面永远停在"正在导入…"，
-         *   还要等下一次"有新增"的导入才把两条提示一起放出来（真机截图 2）。
-         * 【分流】有新增 → 延后（等 RELOAD 的首屏批次落地后追加到底部，位置才对）；
-         *   零新增 → 即时 note（页面没被 reset，直接追加到底部就是正确位置）。 */
-        if(r.imported === 0) ui.note(msg);
-        else ui.noteLater(msg);
+        /* ★★ 2026-11-03 真机反馈：成功提示**不再由前端生成**。★★
+         * 【原来】ui.note() / ui.noteLater() 插的是 DOM 临时节点，刷新就没了；
+         *   而 ".set baredice" 的提示是落在消息表里的真实消息，能长期留存（截图 1 vs 2）。
+         * 【现在】服务端 /import 写一条 kind:'notice' 进 messages 表并广播：
+         *   · 有新增 → 随 RELOAD 的 resync 首屏回来
+         *   · 0 新增 → 以 live BATCH 直接追加
+         *   它带最新 ts / 最大 seq，天然在消息流最末端，刷新、换设备、导出战报都在。
+         *   这里只留「正在导入…」作过程反馈 + 失败提示，不再重复渲染一条完成提示。 */
       }catch(e){
         /* 失败提示必须即时：失败时不会有 resync 的首屏批次，延后 = 永远不显示 */
         ui.note('导入失败：' + (e.message || e));
@@ -174,12 +156,7 @@ function enter(r){
       },
       /* ★ 三种 batch 走三条路：first = 首屏（记锚点）/ page = 上翻（插顶部）/ live = 广播（追到底）。
        *   逻辑在 batch.js —— **生产与冒烟测试共用同一份**，不要再在这里另写一遍。 */
-      batch(msgs, cursor, hasMore, info){
-        applyBatch(ui, msgs, cursor, hasMore, info);
-        /* ★ 首屏/重连批次落地后，把重载与导入完成的提示追加到**最新消息那一端**。
-         *   why 一律是 'first'（room.js 空房间也回一批），所以不会漏 flush。 */
-        if(info && info.why === 'first') ui.flushNotes();
-      },
+      batch(msgs, cursor, hasMore, info){ applyBatch(ui, msgs, cursor, hasMore, info); },
       state(s){ ui.setRoom(s); },                    // ★ 以后端为准回写，不乐观更新
       /* ★ 房间里改名（.name）后，顶栏必须跟着变（真机反馈 · D 组第 3 条）
        * 【症状】.name 改完，服务端与 .status 已经是新昵称，但顶栏还是旧的 ——
@@ -191,13 +168,9 @@ function enter(r){
       reload(f){
         ui.reset();
         net.resync();
-        /* ★ 延后显示：等 resync 的首屏批次落地后由 batch() 追加到最新消息之后，
-         *   而不是插进刚被清空的流里当"最老的一条"（再上拉一页就被顶到中间）。
-         * 【★ 写明是谁（2026-11-02 真机反馈 · 第 3 条）】by 是服务端从 token 查 members 得到的
-         *   权威昵称；旧版服务端没有这个字段时退回"有人"，不至于显示 undefined。 */
-        const who = f.by ? '<b>' + escTxt(f.by) + '</b>' : '有人';
-        ui.noteLater(who + ' 导入了战报，房间消息已按时间重排（新增 <b>' + (f.imported || 0) +
-          '</b> 条，共 <b>' + (f.total || 0) + '</b> 条）');
+        /* ★ 不再本地生成「谁导入了战报」提示（2026-11-03）：服务端已把这条写成
+         *   kind:'notice' 的真实消息落库并广播，resync 首屏会把它带回来 ——
+         *   刷新后还在，且位置天然在最新消息那一端。f.by 仍由服务端带上（兼容旧前端）。 */
       },
       presence(list, online, total){
         ui.setMembers(list, online, total);

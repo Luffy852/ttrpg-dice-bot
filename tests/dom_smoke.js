@@ -576,43 +576,83 @@ function type(ui, net, text){
       /status:r\.status/.test(gw));
   }
 
-  /* ★ 2026-11-02 真机反馈（导入第 2 轮）：重复导入 / 谁导入的 / 来源标注位置
-   * 【为什么是源码断言】onImport 依赖 gate / fetch / room 对象，jsdom 里跑不完整请求链路；
-   *   服务端那条由 e2e_real 真跑（RELOAD 帧的 by 字段），这里锁前端接线。 */
+  /* ★ 2026-11-03 真机反馈：导入提示必须**长期留存**（对比截图 1 / 2）。
+   * 【问题】原来"导入完成 / 谁导入了战报"是前端 ui.note() 插的 DOM 临时节点，刷新即消失；
+   *   而 ".set baredice" 的提示是落在消息表里的 kind:'notice' 真实消息，能回放、能导出。
+   * 【做法】服务端 /import 写一条真实 notice 消息（含导入者 / 新增数 / 来源 / 跳过数），
+   *   前端删掉所有本地完成提示，只留过程反馈与失败提示。
+   * 【为什么这里是源码断言】onImport 依赖 gate / fetch / room 对象，jsdom 跑不完整请求链路；
+   *   "刷新后还在"由 e2e_real 真跑（新开一个 ws 客户端 = 刷新），这里锁接线与渲染。 */
   {
     const main = fs.readFileSync(path.join(__dirname, '../apps/web/src/main.js'), 'utf8');
-    const ui = fs.readFileSync(path.join(__dirname, '../apps/web/src/ui.js'), 'utf8');
+    const uiSrc = fs.readFileSync(path.join(__dirname, '../apps/web/src/ui.js'), 'utf8');
     const room = fs.readFileSync(path.join(__dirname, '../apps/worker/src/room.js'), 'utf8');
 
-    // ① 反馈 1：重复导入（0 新增）不广播 RELOAD，完成提示必须即时显示，不能卡在"正在导入…"
-    ok('★ imported=0 走即时 note（不再等永远不会来的首屏批次）',
-      /if\(r\.imported === 0\) ui\.note\(msg\)/.test(main) &&
-      /else ui\.noteLater\(msg\)/.test(main));
-    ok('★ noteLater 有超时兜底（RELOAD 帧丢了也不吞提示）',
-      /deferTimer = setTimeout\(flushNotes, 2500\)/.test(ui) &&
-      /function flushNotes\(\)/.test(ui) &&
-      /flushNotes,/.test(ui));
-    ok('★ 服务端 0 新增时确实不广播 RELOAD（前端分流的依据）',
-      /if\(!plan\.add\.length\) return Response\.json\(\{imported:0/.test(room) &&
-      !/if\(!plan\.add\.length\)[\s\S]{0,300}broadcast/.test(room));
+    // ① 服务端：写一条真实消息，而不是只广播一个帧
+    ok('★ /import 写 kind:notice 的真实消息（落库才能长期留存）',
+      /kind:'notice'/.test(room) && /payload:\{html\}/.test(room) &&
+      /await this\.storage\(\)\.insertMsgs\(\[notice\]\)/.test(room));
+    ok('★ 用 allocSeq 分配 seq / id（与裸骰提示同一套身份机制）',
+      /const seq = await this\.storage\(\)\.allocSeq\(1\)/.test(room) &&
+      /id:this\.code \+ ':' \+ seq/.test(room));
+    ok('★ 提示总数把自身也算进去（与顶栏条数一致）',
+      /const total = await this\.storage\(\)\.countMsgs\(\) \+ 1/.test(room));
 
-    // ② 反馈 3a：广播写明是谁，且昵称要转义
-    ok('★ RELOAD 广播带 by（按 token 查 members 的权威昵称）',
+    // ② 两条路径：有新增 reload（提示随首屏回来）/ 0 新增 live 追加（不强制刷新）
+    ok('★ 有新增 → RELOAD 整房重载（新提示随 resync 首屏回来）',
+      /if\(added\)\{[\s\S]{0,500}this\.broadcast\(\{t:OUT\.RELOAD/.test(room));
+    ok('★ 0 新增 → 只 live 追加 BATCH，不 RELOAD（用户已定口径）',
+      /this\.broadcast\(\{t:OUT\.BATCH, msgs:\[notice\], cursor:seq\}\)/.test(room) &&
+      !/broadcast\(\{t:OUT\.RELOAD[\s\S]{0,80}imported:0/.test(room));
+    ok('★ 0 新增也留痕（room.js 不再有 imported:0 的提前 return）',
+      !/if\(!plan\.add\.length\) return Response\.json\(\{imported:0/.test(room));
+
+    // ③ 文案：谁 / 来源紧跟新增 / 0 新增不谎称重排，且全部转义
+    ok('★ 提示文案写明导入者（by 来自 token 查 members 的权威昵称）',
       /SELECT nick FROM members WHERE anon_id = \?/.test(room) &&
-      /imported:plan\.add\.length, total, by/.test(room));
-    ok('★ 前端用 f.by 显示导入者，且走 escTxt 转义',
-      /f\.by \? '<b>' \+ escTxt\(f\.by\)/.test(main) &&
-      /const escTxt = s =>/.test(main));
-    ok('★ 旧服务端没有 by 时退回「有人」，不显示 undefined',
-      /: '有人'/.test(main));
+      /'<b>' \+ esc\(by\) \+ '<\/b> 导入了战报/.test(room));
+    ok('★「（来自房间 X）」紧跟新增条数（不在整句末尾）',
+      /新增 <b>' \+ added \+ '<\/b> 条' \+\s*\n\s*\(from\.length/.test(room));
+    ok('★ 昵称 / 房间号 / cap 一律 esc（不往全房消息注入 HTML）',
+      /esc\(by\)/.test(room) && /from\.map\(x => esc\(String\(x\)\)\)/.test(room) &&
+      /esc\(capNote\(total\)\)/.test(room));
+    ok('★ 0 新增时写「无新增，消息顺序未变」（不谎称已重排）',
+      /added \? '，已按时间重排' : '，无新增，消息顺序未变'/.test(room));
 
-    // ③ 反馈 3b：来自房间紧跟"新增 N 条"，不在整句末尾
-    ok('★「来自房间」紧跟新增条数（不再挂在整句末尾）',
-      /新增 <b>' \+ r\.imported \+ '<\/b> 条' \+\s*\n\s*\(r\.from && r\.from\.length/.test(main) &&
-      !/已按时间重排';\s*\n\s*if\(r\.from/.test(main));
-    ok('★ 房间号也走 escTxt', /r\.from\.map\(escTxt\)/.test(main));
-    ok('★ 0 新增时不再谎称「已按时间重排」',
-      /r\.imported > 0 \? '，已按时间重排' : '，无新增，消息顺序未变'/.test(main));
+    // ④ 前端：不再自己拼完成提示（否则与持久化消息重复），也不再需要延后队列
+    /* ★ 注释里会提到旧机制的名字（说明来龙去脉），所以只扫可执行代码特征 */
+    ok('★ 前端删掉本地完成提示（改由服务端真实消息承接）',
+      !/'导入完成：新增'/.test(main) && !/ui\.noteLater\([a-zA-Z]/.test(main) &&
+      !/ui\.flushNotes\(/.test(main));
+    ok('★ 前端保留「正在导入…」过程反馈与失败提示',
+      /ui\.note\('正在导入…'\)/.test(main) && /ui\.note\('导入失败：'/.test(main));
+    ok('★ noteLater / flushNotes 延后队列整套删掉（提示已是最新 seq 的真实消息）',
+      !/noteLater\(html\)\{/.test(uiSrc) && !/function flushNotes\(/.test(uiSrc) &&
+      !/deferredNotes\.push\(/.test(uiSrc) && !/deferTimer = setTimeout/.test(uiSrc) &&
+      !/const deferredNotes =/.test(uiSrc) && !/const escTxt/.test(main));
+
+    // ⑤ 真 DOM：一条 kind:notice 的消息走完整 ws 帧链路，能渲染成 ⓘ 提示
+    {
+      const stream = d.getElementById('stream');
+      const html = '<b>测试员1号</b> 导入了战报：新增 <b>24</b> 条（来自房间 593353），' +
+        '跳过已存在的 14 条。房间现有 831 条，已按时间重排';
+      const noticeMsg = {seq:9999, id:'009950:9999', ts:Date.now(), kind:'notice',
+        from:'骰娘', actor:null, anon_id:null, req_id:null, rule_at:'generic', payload:{html}};
+      w.__route__({t:OUT.BATCH, msgs:[noticeMsg], cursor:9999, has_more:false});
+      await sleep(10);
+      const notes = [...stream.querySelectorAll('.notice:not(.loadbtn)')];
+      const txt = notes.map(e => e.textContent).join('\n');
+      ok('★ 持久化 notice 消息能渲染成 ⓘ 提示（与裸骰提示同款）',
+        /导入了战报/.test(txt) && /新增 24 条/.test(txt), txt.slice(-120));
+      ok('★ 提示里带导入者昵称与来源房间',
+        /测试员1号/.test(txt) && /593353/.test(txt), txt.slice(-120));
+      /* ★ 再送一条同 id 的帧必须被 msg_id 去重挡掉 —— 刷新重放不能变成两条 */
+      w.__route__({t:OUT.BATCH, msgs:[noticeMsg], cursor:9999, has_more:false});
+      await sleep(10);
+      ok('★ 同一条 notice 重放不重复渲染（msg_id 去重）',
+        [...stream.querySelectorAll('.notice:not(.loadbtn)')]
+          .filter(e => /导入了战报/.test(e.textContent)).length === 1);
+    }
   }
 
   /* ★ .help 的「当前规则」：规则名只在小标题里，不再单独重复一行、也不再出现"规则键"
