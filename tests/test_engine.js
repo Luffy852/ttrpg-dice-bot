@@ -1161,6 +1161,32 @@ console.log('== 21. M2 铁律回归（四套规则都满足同一套铁律）★
   });
   eq('六规则都有专属帮助页', Object.keys(Engine.HELP_BODY).length, 6);
 
+  /* ★ 2026-11-03 真机反馈 · 第 2 条：中文别名一览是**跨规则通用**说明，
+   *   原来挂在 helpDnd() 里（dnd5e / dnd5r 共用），查 `.help dnd` 才会看到 —— 放错了地方。
+   *   现在只挂到 helpTop()（不带参数的 `.help`）。这里锁住两件事：
+   *   ① 一览在 .help 里、内容完整；② 六个规则专属页一个都不带它（防止以后又有人加回去）。 */
+  {
+    const top = Engine.helpTop('dnd5r');
+    const aliasSec = (top.sections || []).find(s => /^中文别名一览/.test(s.h || ''));
+    ok('★ .help 里有「中文别名一览」', !!aliasSec && (aliasSec.rows || []).length === 4,
+      JSON.stringify(aliasSec && aliasSec.rows));
+    ok('★ 一览含动词 / 规则 / 开关 / 前缀四类',
+      ['动词','规则','开关','前缀'].every(k =>
+        ((aliasSec && aliasSec.rows) || []).some(r => r.k === k)),
+      JSON.stringify(aliasSec && aliasSec.rows));
+    ok('★ .help 底部不再重复一句笼统的「都认中文」',
+      !(top.foot || []).some(x => /都认中文/.test(x)), JSON.stringify(top.foot));
+    ['generic','dnd5e','dnd5r','coc7','dh','fu'].forEach(k => {
+      const body = JSON.stringify(Engine.HELP_BODY[k]());
+      ok('★ 规则专属页不含通用别名一览：' + k,
+        !/中文别名一览/.test(body) && !/按你想的意思打就行/.test(body));
+    });
+    const dnd = Engine.handleCommand('.help dnd', mkCtx('dnd5r')).msgs[0].html;
+    ok('★ 真跑 .help dnd 不再出现中文别名一览', !/中文别名一览/.test(dnd));
+    const htop = Engine.handleCommand('.help', mkCtx('dnd5r')).msgs[0].html;
+    ok('★ 真跑 .help 出现中文别名一览', /中文别名一览/.test(htop));
+  }
+
   // 铁律 4：判定不进主流程 —— 各包的 runCheck / verbs 存在且被使用
   ok('D&D 包有 runCheck', typeof Engine.DND_PACK.runCheck === 'function');
   ok('COC 包有 runCheck', typeof Engine.COC_PACK.runCheck === 'function');
