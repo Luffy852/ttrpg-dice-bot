@@ -97,6 +97,23 @@ async function boot(){
   const server = w.__SERVER__;
   const me = server.join('老王');
 
+  /* ★ T3a：冒烟与生产共用同一张帧路由表（apps/web/src/frame-route.js）。
+   *   这里只提供"这个帧到了页面里该调哪个 UI 方法"，分发逻辑本身一行都不抄 ——
+   *   坑 #18 的老戏（测试副本抄对了、生产写错）从根上封死。 */
+  const {createFrameRouter} = await import('../apps/web/src/frame-route.js');
+  const route = createFrameRouter({
+    welcome(f){ ui.setRoom(f.room); ui.setMe(f.you.nick); ui.setMembers(f.members); },
+    /* ★ 与生产 main.js 共用 batch.js —— 不在这里另写一份判断。 */
+    batch(f){ applyBatch(ui, f.msgs, f.cursor, f.has_more, {why:f.why, oldest:f.oldest, total:f.total, hasMoreOlder:!!f.has_more}); },
+    state(f){ ui.setRoom(f.room); },
+    presence(f){ ui.setMembers(f.members); },
+    reject(f){ ui.failPending(f.req_id, f.code); },
+    dup(f){
+      // ★ 与 main.js 的 on.dup 保持一致：dup 不带 batch，必须标记占位气泡，否则永远"发送中"
+      ui.failPending(f.req_id, f.deleted ? '这条已被清理' : '已掷过（重复请求）');
+    },
+  });
+
   // 把 net.js 的 WebSocket 构造替换成内存连接，并把帧路由接到 mock server
   w.__net__ = {
     __onFrame: async f => {
@@ -106,20 +123,6 @@ async function boot(){
       (r.me || []).concat(r.all || []).forEach(x => route(x));
     },
   };
-  function route(f){
-    const n = net;
-    if(f.t === OUT.WELCOME){ ui.setRoom(f.room); ui.setMe(f.you.nick); ui.setMembers(f.members); }
-    /* ★ 与生产 main.js 共用 batch.js —— 不在这里另写一份判断，
-     *   否则"测试用副本、真机用原版"，两边漂移就是上次上翻失效的元凶。 */
-    else if(f.t === OUT.BATCH){ applyBatch(ui, f.msgs, f.cursor, f.has_more, {why:f.why, oldest:f.oldest, total:f.total, hasMoreOlder:!!f.has_more}); }
-    else if(f.t === OUT.STATE){ ui.setRoom(f.room); }
-    else if(f.t === OUT.PRESENCE){ ui.setMembers(f.members); }
-    else if(f.t === OUT.REJECT){ ui.failPending(f.req_id, f.code); }
-    else if(f.t === OUT.DUP){
-      // ★ 与 main.js 的 on.dup 保持一致：dup 不带 batch，必须标记占位气泡，否则永远"发送中"
-      ui.failPending(f.req_id, f.deleted ? '这条已被清理' : '已掷过（重复请求）');
-    }
-  }
 
   /* ★ 导出走**生产的** ask.js（与 main.js 同一份），不在这里另写一遍判断 ——
    *   否则"测试替身抄生产逻辑"的老戏又要重演（真机验收 · 上翻失效那条）。 */
