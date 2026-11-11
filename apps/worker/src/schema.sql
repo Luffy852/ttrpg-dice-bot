@@ -15,6 +15,7 @@ PRAGMA journal_mode = WAL;
 
 -- ★ 旧库迁移（room.js 构造时执行，幂等）：
 --   ALTER TABLE members ADD COLUMN cid TEXT;   -- 已存在的表不会被 CREATE TABLE IF NOT EXISTS 改到
+--   ALTER TABLE room ADD COLUMN notified_clean INTEGER NOT NULL DEFAULT 0;  -- 旧房间缺列会让 alarm 的 UPDATE 整段中断
 --   CREATE INDEX IF NOT EXISTS idx_members_cid ON members(cid);
 
 -- 房间元信息（单行：一个 DO = 一个房间，不需要多表 JOIN）
@@ -30,6 +31,7 @@ CREATE TABLE IF NOT EXISTS room (
   pin_hmac     TEXT,                       -- NULL = 开放式房间；★ 只存摘要，不存明文
   pin_salt     TEXT,
   seq          INTEGER NOT NULL DEFAULT 0, -- 已分配到的最大 seq（冷启动时用 MAX(messages.seq) 校准）
+  notified_clean INTEGER NOT NULL DEFAULT 0, -- ★ 提前 7 天清理提醒是否已发；旧库由 room.js 幂等 ALTER 补列
   ver          INTEGER NOT NULL DEFAULT 1  -- schema 版本，便于迁移
 );
 

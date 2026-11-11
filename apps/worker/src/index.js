@@ -18,7 +18,7 @@
  *      且自建方案只看得见本应用。改用 Cloudflare 原生 Alerts 对账户级 5 GB 告警。
  * ========================================================================== */
 import {RoomDO} from './room.js';
-import {newCode, isCode, isPin, signToken} from './auth.js';
+import {newCode, isPin} from './auth.js';
 
 export {RoomDO};
 
@@ -43,76 +43,9 @@ export default {
   async fetch(request, env){
     const url = new URL(request.url);
 
-    /* ★ 在线诊断：打开一个网址就能看到"到底哪一步不通"（纯文本，浏览器直接显示）
-     * 【为什么要有】ws 连不上时，我在沙盒里**拿不到任何服务端日志**（部署不了、没有 tail）。
-     *   只能靠推理，已经错了两轮。这个端点把运行时的事实一次性打出来：
-     *   密钥有没有、DO 绑定在不在、房间号能不能匹配、DO 能不能访问。
-     *   用法：浏览器打开 /api/diag?code=123456 —— 把看到的文字整段发给我。 */
-    /* ★ ws 握手专项诊断：从 Worker 内部用 fetch 带 Upgrade 头打一次 DO，看它回什么
-     * 【与 /api/diag 的区别】/api/diag 只证明"DO 活着、认得房间号"；
-     *   这里直接模拟一次 WebSocket 握手，能区分三种失败：
-     *     ① DO 回了 101        → 服务端没问题，问题在 Cloudflare 的路由/静态资源层
-     *     ② DO 回了 401        → token 校验挂了（PIN_SECRET 变了 / token 过期）
-     *     ③ DO 回了 404/500    → 路由没匹配或代码抛异常
-     *   用法：浏览器打开 /api/wsdiag?code=123456 */
-    if(url.pathname === '/api/wsdiag'){
-      const c = (url.searchParams.get('code') || '').trim();
-      const L = [];
-      const say = (k, v) => L.push(k.padEnd(24) + ' : ' + v);
-      if(!/^\d{6}$/.test(c)){
-        return new Response('需要 6 位房间号：/api/wsdiag?code=123456', {status:400,
-          headers:{'content-type':'text/plain; charset=utf-8'}});
-      }
-      try{
-        const t = await signToken({code:c, anon_id:'diag', exp:Math.floor(Date.now() / 1000) + 300}, env.PIN_SECRET);
-        const up = new Request('https://room.do/ws/' + c + '?token=' + encodeURIComponent(t), {
-          headers:{'Upgrade':'websocket', 'Connection':'Upgrade',
-            'Sec-WebSocket-Key':'dGhlIHNhbXBsZSBub25jZQ==', 'Sec-WebSocket-Version':'13'},
-        });
-        const r = await stubOf(env, c).fetch(up);
-        say('DO 握手返回状态', r.status + '  ' + ((r.status === 101) ? '✅ 101 = 握手成功' : '❌ 期待 101'));
-        say('Upgrade 响应头', r.headers.get('Upgrade') || '(无)');
-        say('Connection 响应头', r.headers.get('Connection') || '(无)');
-        say('webSocket 对象', r.webSocket ? '✅ 已附上' : '❌ 缺失（DO 没走 WebSocketPair）');
-        L.push('');
-        L.push('判读：');
-        L.push('  101 + 已附上 → 服务端 OK，问题在 Cloudflare 路由层（run_worker_first / 静态资源）');
-        L.push('  401          → token 校验挂了：PIN_SECRET 与签发时不一致，或服务器时间不对');
-        L.push('  404          → DO 里没匹配上 /ws 路径（room.js 的路由）');
-        L.push('  500          → DO 代码抛异常');
-      }catch(e){
-        say('DO 握手', '❌ 抛异常：' + String((e && e.message) || e));
-      }
-      return new Response(L.join('\n'), {headers:{'content-type':'text/plain; charset=utf-8'}});
-    }
-
-    if(url.pathname === '/api/diag'){
-      const code = (url.searchParams.get('code') || '').trim();
-      const L = [];
-      const say = (k, v) => L.push(k.padEnd(22) + ' : ' + v);
-      say('Worker', '运行中（能看到这行就说明 Worker 活着）');
-      say('PIN_SECRET', env.PIN_SECRET ? ('已设置（长度 ' + String(env.PIN_SECRET).length + '）') : '❌ 未设置');
-      say('ROOM 绑定', env.ROOM ? '已绑定' : '❌ 未绑定（wrangler.toml 的 durable_objects 没生效）');
-      say('ASSETS 绑定', env.ASSETS ? '已绑定' : '❌ 未绑定');
-      say('房间号入参', code ? code : '（未带 code 参数）');
-      say('房间号格式(6位数字)', /^\d{6}$/.test(code) ? '✅ 合法' : '❌ 不合法');
-      if(env.ROOM && /^\d{6}$/.test(code)){
-        try{
-          const r = await stubOf(env, code).fetch('https://room.do/meta');
-          const j = await r.json().catch(() => ({}));
-          say('DO 可访问', '✅ 是（HTTP ' + r.status + '）');
-          say('DO 返回的房间号', j.code || '(空)');
-          say('DO 是否认得这个房间', (j.code === code) ? '✅ 认得' : '❌ 对不上（DO 的 idFromName 与房间号不一致）');
-          say('规则', j.rule || '(空)');
-          say('成员数', (j.members || []).length);
-        }catch(e){
-          say('DO 可访问', '❌ 抛异常：' + String(e && e.message || e));
-        }
-      }
-      L.push('');
-      L.push('—— 如果上面都正常但仍连不上，请把这段整段发我 ——');
-      return new Response(L.join('\n'), {headers:{'content-type':'text/plain; charset=utf-8'}});
-    }
+    /* ★ T1：两个无鉴权诊断端点已移除（一次 GET 即可枚举房间号 / 成员数 / 规则 / 密钥配置，
+     *   或用 PIN_SECRET 自签 token 替访客发起 ws 握手）。排障改用 Cloudflare 网页端日志；
+     *   所有 /api/* 未命中分支一律返回 404，不落到静态资源 SPA 兜底（见文件末尾）。 */
 
     if(url.pathname === '/api/room' && request.method === 'POST'){
       let body = {};
@@ -170,6 +103,12 @@ export default {
       }
       return JSON_({error:'bad_sub'}, 404);
     }
+
+    /* ★ T1：/api/* 已知分支都未命中 → 明确 404，不交给 env.ASSETS。
+     *   wrangler.toml 的 not_found_handling = "single-page-application" 会把未知路径
+     *   兜成 index.html + 200；光删端点会让被删的诊断地址拿到 200 页面，既达不到
+     *   「返回 404」的验收，也会把 API 路径伪装成正常页面。 */
+    if(url.pathname.startsWith('/api/')) return new Response('not found', {status:404});
 
     m = url.pathname.match(/^\/ws\/(\d{6})$/);
     if(m){

@@ -60,6 +60,42 @@ console.log('== ② schema.sql 是唯一出处：room.js 的 SCHEMA 不能与它
   ok('★ 表集合一致', JSON.stringify(t1) === JSON.stringify(t2), 'schema=' + t1.join(',') + ' room=' + t2.join(','));
   const i1 = idxOf(ddl), i2 = idxOf(room);
   ok('★ 索引集合一致', JSON.stringify(i1) === JSON.stringify(i2), 'schema=' + i1.join(',') + ' room=' + i2.join(','));
+  /* ★ T1：列级一致性。旧检查只比表名与索引名，实测抓不到「room.js 的 TABLES
+   *   已补 notified_clean、schema.sql 还是旧定义」这类列漂移。
+   *   括号内可能出现 CHECK (id = 1) 的嵌套，非贪婪正则会截断，必须逐字符扫深度。 */
+  const stripComments = s => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/--[^\n]*/g, '');
+  const splitTop = s => {
+    let depth = 0, out = [], cur = '';
+    for(const ch of s){
+      if(ch === '(') depth++;
+      else if(ch === ')') depth--;
+      if(ch === ',' && depth === 0){ out.push(cur); cur = ''; }
+      else cur += ch;
+    }
+    out.push(cur); return out;
+  };
+  const colsOf = s => {
+    const src = stripComments(s), map = {}, re = /CREATE TABLE IF NOT EXISTS\s+(\w+)\s*\(/g;
+    let m;
+    while((m = re.exec(src))){
+      let i = re.lastIndex, depth = 1, body = '';
+      while(i < src.length && depth > 0){
+        const ch = src[i];
+        if(ch === '(') depth++;
+        else if(ch === ')') depth--;
+        if(depth > 0) body += ch;
+        i++;
+      }
+      map[m[1]] = splitTop(body).map(p => (p.trim().match(/^(\w+)/) || [])[1])
+        .filter(c => c && !/^(PRIMARY|CHECK|UNIQUE|CONSTRAINT|FOREIGN|KEY)$/i.test(c)).sort();
+    }
+    return map;
+  };
+  const c1 = colsOf(ddl), c2 = colsOf(room);
+  Object.keys(c1).forEach(t => {
+    ok('★ 列集合一致 · ' + t, JSON.stringify(c1[t]) === JSON.stringify(c2[t] || []),
+      'schema=' + (c1[t] || []).join(',') + ' room=' + (c2[t] || []).join(','));
+  });
   ok('schema.sql 里写了"唯一出处"的说明（改的人会被提醒）', /唯一出处/.test(ddl));
   ok('room.js 里提示了两处必须同步', /唯一出处|不能只在其中一处改/.test(room));
   // 关键列：游标与幂等不能少
@@ -88,6 +124,12 @@ console.log('== ③ Worker 侧不许踩的坑 ==');
   const front = read('apps/web/src/main.js');
   ok('★ 前端不含 PIN_SECRET / 秘钥字面量', !/PIN_SECRET|secret/i.test(front.replace(/secret-?key/i, '')));
   ok('★ 前端不存 PIN（只存 token）', !/localStorage\.setItem\([^)]*pin/i.test(front));
+  /* ★ T1：两个无鉴权诊断端点必须移除。一次 GET 就能枚举房间号 / 成员数 / 规则，
+   *   wsdiag 还能用 PIN_SECRET 自签 5 分钟 token 替访客发起握手。
+   *   用精确匹配，避免只因注释里提到路径就误判。 */
+  const gateway = read('apps/worker/src/index.js');
+  ok('★ /api/diag 分支已移除', !/url\.pathname\s*===\s*'\/api\/diag'/.test(gateway));
+  ok('★ /api/wsdiag 分支已移除', !/url\.pathname\s*===\s*'\/api\/wsdiag'/.test(gateway));
 }
 
 console.log('---------------------------');
