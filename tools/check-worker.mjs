@@ -155,6 +155,63 @@ console.log('== ④ .h 的 recentRolls 口径（线上事故 · 房间 593353）
     /storage\.recentRolls\(nick,\s*IDLE_ROLLS\)/.test(coreSrc));
 }
 
+console.log('== ⑤ T6 · schema 单一源 + 三段式迁移模板 ==');
+/* ② 只比「表名 / 索引名 / 列集合」，语句本身换列、索引挪位置它抓不到。
+ *   这里把 schema.sql 当唯一源：由它生成规范化语句，room.js 的 TABLES / INDEXES
+ *   必须逐条等价；再把 009950 事故换来的「表 → 补列 → 索引」锁成可执行断言。
+ *   ★ 不改 ④ 节：recentRolls 的 actor 口径锁是线上事故换来的，别覆盖。 */
+{
+  const ddl = read('apps/worker/src/schema.sql');
+  const room = read('apps/worker/src/room.js');
+  const strip = t => t.replace(/\/\*[\s\S]*?\*\//g, '').replace(/--[^\n]*/g, '');
+  const norm = t => strip(t).replace(/\s+/g, ' ').trim().replace(/;$/, '').trim()
+    .replace(/\s*([(),])\s*/g, '$1');
+  /* 由 schema.sql 生成期望语句（唯一源）：分号是语句边界 */
+  const gen = kw => {
+    const s = strip(ddl), re = new RegExp(kw + '\\s+', 'g'), out = [];
+    let m;
+    while((m = re.exec(s))){
+      const j = s.indexOf(';', m.index);
+      if(j < 0) continue;
+      out.push(norm(s.slice(m.index, j)));
+      re.lastIndex = j + 1;
+    }
+    return out;
+  };
+  /* 取 room.js 里的运行时语句（模板字符串，无分号） */
+  const take = name => {
+    const m = room.match(new RegExp('export const ' + name + ' = \\[([\\s\\S]*?)\\n\\];'));
+    return m ? [...m[1].matchAll(/`([^`]*)`/g)].map(x => norm(x[1])) : [];
+  };
+  const key = s => (s.match(/(?:TABLE|INDEX)\s+IF NOT EXISTS\s+(\w+)/) || [])[1];
+  const byKey = arr => Object.fromEntries(arr.map(s => [key(s), s]));
+  const pairs = (a, b) => {
+    const A = byKey(a), B = byKey(b);
+    const names = [...new Set([...Object.keys(A), ...Object.keys(B)])].sort();
+    const bad = names.filter(n => A[n] !== B[n]);
+    return {n:names.length, bad:bad.length, extra:bad.join(',')};
+  };
+  const t = pairs(gen('CREATE TABLE IF NOT EXISTS'), take('TABLES'));
+  ok('★ 单一源 · 表语句逐条等价（' + t.n + ' 条）', t.bad === 0, '不一致：' + t.extra);
+  const i = pairs(gen('CREATE INDEX IF NOT EXISTS'), take('INDEXES'));
+  ok('★ 单一源 · 索引语句逐条等价（' + i.n + ' 条）', i.bad === 0, '不一致：' + i.extra);
+  /* 三段式护栏（H·7.2 ④）：索引混进建表数组 = 009950 事故 */
+  const tablesBlock = (room.match(/export const TABLES = \[([\s\S]*?)\n\];/) || [,''])[1];
+  ok('★ 迁移三段式 · CREATE INDEX 不得出现在 TABLES 数组', !/CREATE INDEX/i.test(tablesBlock));
+  ok('★ 迁移三段式 · TABLES 不含任何索引名',
+    Object.keys(byKey(take('INDEXES'))).every(n => !tablesBlock.includes(n)));
+  const pT = room.indexOf('TABLES.forEach'), pA = room.indexOf('ALTER TABLE members'), pI = room.indexOf('INDEXES.forEach');
+  ok('★ 迁移三段式 · 构造顺序 TABLES → ALTER → INDEXES', pT >= 0 && pA > pT && pI > pA,
+    'T=' + pT + ' A=' + pA + ' I=' + pI);
+  const alters = [...room.matchAll(/ALTER TABLE \w+ ADD COLUMN/g)].length;
+  const guarded = [...room.matchAll(/try\{\s*this\.sql\.exec\('ALTER TABLE \w+ ADD COLUMN/g)].length;
+  ok('★ 迁移三段式 · 每条 ALTER 都 try/catch 幂等（' + guarded + '/' + alters + '）',
+    alters > 0 && guarded === alters);
+  /* A 决策口径锁：别把 v1「导出筛选要用」的旧说明改回来误导后人 */
+  ok('★ A 决策 · idx_messages_sender 说明已订正',
+    !/导出筛选（v2）要用/.test(ddl) && /当前\*\*没有任何产品查询\*\*按 anon_id 过滤/.test(ddl));
+}
+
 console.log('---------------------------');
 console.log('Worker 接口检查：通过 ' + pass + ' 项，失败 ' + fail + ' 项');
 process.exit(fail ? 1 : 0);

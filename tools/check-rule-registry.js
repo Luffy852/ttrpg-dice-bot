@@ -34,6 +34,10 @@ const rulesSrc = read('rules.js');
 const packsSrc = read('packs.js');
 const domSrc   = read('domains.js');
 const indexSrc = read('index.js');
+/* ★ T6a：规则包接口契约的唯一出处（引擎同层）。静态文本读取，不动态 import ——
+ *   契约文件不在 index.js 的 export 列表里，也绝不能依赖 apps/web/vendor/**
+ *   （T4a 沉淀的零生成物依赖口径）。文件被删 / 改名时 read() 会直接抛错，不会静默放行。 */
+const contractSrc = read('pack-contract.js');
 
 /* ① 规则的"全集"来自 RULE_META —— 它是唯一权威名单 */
 const metaBlock = (rulesSrc.match(/RULE_META\s*=\s*\{([\s\S]*?)\n\};/) || [])[1] || '';
@@ -87,9 +91,32 @@ ok('★ index.js 导出了全部规则包', notExported.length === 0, '缺：' +
 
 /* ⑧ 每个包都必须实现规则包接口（缺方法会在用到时才炸） */
 {
-  // ★ runCheck 是**条件必选**：supportsCheck:false 的包（通用/匕首心/最终物语）本来就不走 .rc，
-  //   强制要求会逼它们写空实现 —— 空实现比没有更糟（看着支持，其实什么都不做）
-  const base = ['family','checkHint','listChecks','checkOffNote','cardTemplate','parseCard','renderCard'];
+  /* ★ T6a：字段清单不再硬编码在脚本里 —— 由 pack-contract.js 提供（唯一出处）。
+   *   契约加字段 → 下面每个包的 need 自动多一项 → 红；五个包补齐 → 绿（H·7.2 ③）。
+   *   runCheck 仍是**条件必选**：supportsCheck:false 的包（通用/匕首心/最终物语）
+   *   本来就不走 .rc，强制要求会逼它们写空实现 —— 空实现比没有更糟。 */
+  const fieldsOf = key => {
+    const m = contractSrc.match(new RegExp('const\\s+' + key + '\\s*=\\s*\\[([^\\]]*)\\]'));
+    return m ? [...m[1].matchAll(/'([^']+)'/g)].map(x => x[1]) : [];
+  };
+  const base = fieldsOf('PACK_FIELDS');
+  const conditional = fieldsOf('CONDITIONAL_FIELDS');
+  ok('★ 契约 PACK_FIELDS 非空且都是合法标识符',
+    base.length > 0 && base.every(f => /^[A-Za-z_$][\w$]*$/.test(f)), base.join(','));
+  ok('★ 契约字段名无重复', new Set(base).size === base.length, base.join(','));
+  ok('★ 条件字段不与基础字段重叠',
+    conditional.length > 0 && conditional.every(f => !base.includes(f)), conditional.join(','));
+  ok('★ 契约文件是唯一出处（脚本内不再硬编码字段清单）',
+    /export \{ PACK_FIELDS, CONDITIONAL_FIELDS \}/.test(contractSrc) &&
+    !/const base = \['family'/.test(fs.readFileSync(path.join(__dirname, 'check-rule-registry.js'), 'utf8')));
+  /* ★ 机制自证（不是摆设断言）：用同一套 need/miss 计算逻辑喂一份
+   *   「契约多了一个字段、包只实现了原来那些」的假样本，结果必须恰好报缺那一个新字段。 */
+  const probeField = '__contract_probe_field';
+  const fakePkg = 'const P = {\n' + base.concat(conditional).map(f => '  ' + f + ':()=>{},\n').join('') + '};';
+  const probeMiss = base.concat(conditional, probeField)
+    .filter(m => !new RegExp('\\b' + m + '\\b').test(fakePkg));
+  ok('★ 契约同步机制：契约加字段而包未补即红（探针自证）',
+    probeMiss.length === 1 && probeMiss[0] === probeField, probeMiss.join(','));
   const pkgs = {};
   for(const f of packFiles){
     const s = read(f);
@@ -97,7 +124,7 @@ ok('★ index.js 导出了全部规则包', notExported.length === 0, '缺：' +
     const name = (s.match(/export const (\w+)\s*=\s*\{/) || s.match(/const (\w+_PACK)\s*=\s*\{/) || [])[1];
     if(!name){ ok(f + ' 找不到导出的包对象', false); continue; }
     pkgs[name] = s;
-    const need = /supportsCheck\s*:\s*true/.test(s) ? base.concat('runCheck') : base;
+    const need = /supportsCheck\s*:\s*true/.test(s) ? base.concat(conditional) : base;
     const miss = need.filter(m => !new RegExp('\\b' + m + '\\b').test(s));
     ok('★ ' + f + ' 实现了包接口', miss.length === 0, '缺：' + miss.join(','));
   }
@@ -115,7 +142,7 @@ console.log('规则注册点自检：通过 ' + pass + ' 项，失败 ' + fail +
 if(fail === 0){
   console.log('');
   console.log('📋 加新规则的完整清单（照着改，改完跑本脚本，全绿才算登记完整）：');
-  console.log('   1) 新建 packages/engine/src/pack_<规则>.js（实现 9 个接口方法）');
+  console.log('   1) 新建 packages/engine/src/pack_<规则>.js（实现 pack-contract.js 里 PACK_FIELDS 列出的接口）');
   console.log('   2) packs.js：import 该包 + RULE_PACKS 加一行 + FAMILY_PACKS 加一行');
   console.log('   3) rules.js：RULE_META 加一项 + IMPLEMENTED 加一项 + registerAliases(\'rule\') 加别名');
   console.log('   4) domains.js：CHECK_DOMAIN 加一项 + CARD_DOMAIN 加一项');

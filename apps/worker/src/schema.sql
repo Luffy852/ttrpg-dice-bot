@@ -9,6 +9,9 @@
  *   ③ 角色卡 data 存自由 JSON，由卡自己的族解释（四套卡模型差异大，不强统一）
  * 【接口对齐】apps/worker/src/room.js 用本 schema 实现 core.js 需要的 storage 接口；
  *   tests/memory_storage.js 是同接口的内存替身（用于沙盒内验证纯逻辑）
+ * 【★ T6 单一源】本文件是 DDL 唯一出处：tools/check-worker.mjs ⑤ 节由它生成规范化语句，
+ *   room.js 的 TABLES / INDEXES 必须逐条等价。改列 / 改索引只能先改这里再同步 room.js，
+ *   否则 check:all 直接红 —— 不要只在其中一处改。
  * ========================================================================== */
 
 PRAGMA journal_mode = WAL;
@@ -16,7 +19,7 @@ PRAGMA journal_mode = WAL;
 -- ★ 旧库迁移（room.js 构造时执行，幂等）：
 --   ALTER TABLE members ADD COLUMN cid TEXT;   -- 已存在的表不会被 CREATE TABLE IF NOT EXISTS 改到
 --   ALTER TABLE room ADD COLUMN notified_clean INTEGER NOT NULL DEFAULT 0;  -- 旧房间缺列会让 alarm 的 UPDATE 整段中断
---   CREATE INDEX IF NOT EXISTS idx_members_cid ON members(cid);
+--   （idx_members_cid 见下方索引区；T6 起它是正式语句，不再是注释里的示意）
 
 -- 房间元信息（单行：一个 DO = 一个房间，不需要多表 JOIN）
 CREATE TABLE IF NOT EXISTS room (
@@ -62,10 +65,17 @@ CREATE TABLE IF NOT EXISTS messages (
 /* ★ keep_until 为什么不直接改 ts：ts 是**发生时间**，是排序键也是内容的一部分。
  *   把续期写进 ts 会让老消息假装是刚发生的 —— 排序错位（它会被排到今天的消息里），
  *   且战报里的时间全错。续期只影响"什么时候可以被清理"，就单独存一个字段。 */
+CREATE INDEX IF NOT EXISTS idx_members_cid    ON members(cid);           -- ★ T6：由注释提升为正式语句；room.js 一直在建它，运行时零变化
 CREATE INDEX IF NOT EXISTS idx_messages_keep  ON messages(keep_until);   -- 清理：ts 与 keep_until 双条件
 CREATE INDEX IF NOT EXISTS idx_messages_ts    ON messages(ts);           -- 30 天清理
 CREATE INDEX IF NOT EXISTS idx_messages_req    ON messages(req_id);      -- 幂等回查
--- ★ idx_sender：v1 就建。导出筛选（v2）要用，而**补索引属于 schema 迁移**，现在建边际成本≈0
+/* ★ idx_sender（T6 已拍板 · 方案 A：只订正说明，不动 DDL）
+ *   v1 预留按 anon_id 查消息，但当前**没有任何产品查询**按 anon_id 过滤 messages：
+ *   · 导出筛选走 from_name IN (…)（apps/worker/src/export.js:30），按昵称比对；
+ *   · .h 走 actor（T5 后热修：骰娘 roll 的 anon_id 恒为 null）。
+ *   两者都不命中这张卡；房间软上限 5000 条，逐条比对的实际开销可忽略。
+ *   保留定义、不 DROP 不重建：将来若做「按 anon_id 追溯消息」，无需再补索引 / 迁移；
+ *   若要做「按昵称高频筛选」，需另立一步评估新索引 —— 本卡不命中，不能靠改注释解决。 */
 CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(anon_id, seq);
 
 -- 幂等（★ 防重掷：同一条指令只执行一次）
