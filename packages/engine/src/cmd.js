@@ -168,7 +168,7 @@ function handleCommand(text, ctx){
     defs({title:'我最近 ' + mine.length + ' 条投掷', rows:mine.map(m => ({
       k:m.view.title,
       v:'→ ' + m.view.total + (m.view.verdict && m.view.verdict.ok !== null ? '　' + (m.view.verdict.ok ? '✅ 成功' : '❌ 失败') : '')
-    })), foot:['点开任意骰点消息可查看逐骰明细']});
+    })), foot:['从上到下：最新投掷 → 最久投掷']});
     return {msgs:out, handled:true};
   }
 
