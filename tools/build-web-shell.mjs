@@ -23,6 +23,24 @@ const WEB = path.join(ROOT, 'apps', 'web');
 
 let html = fs.readFileSync(LEGACY, 'utf8');
 
+/* ★ T6 占位符模板（R3）：②–④ 的每个注入点都改成具名 SLOT。
+ *   老写法是裸 html.replace(字面量, …) —— legacy 里那行一旦被改动，replace 会**静默不命中**，
+ *   要等生成物残缺、或跑完末尾 includes 自检才发现（标题被覆盖回去就是这么来的）。
+ *   现在构造期先验锚点存在且次数正确，再替换，替换后立即验注入结果，缺一步就抛错。
+ *   ★ 与 T5 第 ① 步的 BUILD_ANCHOR 区互不重叠：这里只管下面的注入点，不碰锚点替换。 */
+const SLOT_LOG = [];
+function slot(name, find, put, verify){
+  const isRe = find instanceof RegExp;
+  const hits = isRe ? (html.match(find) || []).length : html.split(find).length - 1;
+  if(isRe ? hits < 1 : hits !== 1){
+    throw new Error('SLOT ' + name + ' 锚点异常：命中 ' + hits + ' 次（期望' +
+      (isRe ? ' ≥1' : ' 恰好 1') + '）—— legacy 改过了？生成物会被静默改坏');
+  }
+  html = html.replace(find, put);
+  if(!html.includes(verify)) throw new Error('SLOT ' + name + ' 注入失败：生成物里找不到 ' + verify);
+  SLOT_LOG.push(name);
+}
+
 /* ① 把「单机前端 script 的位置」换成联网版的 module 入口
  * ★ T5（legacy 瘦身）：legacy 内嵌的 89,102 B 单机前端已在 T5 删除，
  *   老逻辑 `indexOf('<script>')` 会直接找不到 → 抛错 → 部署期 Build 崩。
@@ -45,26 +63,26 @@ html = html.slice(0, a0) +
 /* ② 标题：这是**联网版**，不是单机版 —— 标签页标题与顶栏都要改
  *  ★ 必须改在这里而不是手改 index.html：index.html 是**生成物**，
  *    下次跑这个脚本就会被覆盖回去（我刚踩过：改完了、一 build 又变回"单机可摸版"）。 */
-html = html.replace(/骰娘 M2 · 单机可摸版/g, 'TRPG · 骰娘在线');
+slot('TITLE', /骰娘 M2 · 单机可摸版/g, 'TRPG · 骰娘在线', 'TRPG · 骰娘在线');
 
 /* ② 顶栏：房间信息 + 导出 + 导入 */
-html = html.replace('<span class="pill" id="p-cnt">0 条</span>',
-  '<span class="pill" id="p-room">房间 —</span>\n      <span class="pill" id="p-cnt">0 条</span>');
-html = html.replace('<button class="quick" data-cmd=".set baredice on">.set baredice on</button>',
+slot('TOP_ROOM', '<span class="pill" id="p-cnt">0 条</span>',
+  '<span class="pill" id="p-room">房间 —</span>\n      <span class="pill" id="p-cnt">0 条</span>', 'id="p-room"');
+slot('TOP_BTN', '<button class="quick" data-cmd=".set baredice on">.set baredice on</button>',
   '<button class="quick" data-cmd=".set baredice on">.set baredice on</button>\n      <button class="quick" id="btn-export">导出战报</button>' +
   /* ★ 导入按钮：战报导出去就得能导回来，否则"NDJSON 可原样回灌"是句空话 */
   '\n      <button class="quick" id="btn-import">导入战报</button>' +
   /* ★ 隐藏的 file 控件：<button> 无法直接触发选文件，必须借一个真实的 input[type=file] */
-  '\n      <input type="file" id="file-import" accept=".ndjson,.json,.txt" hidden>');
+  '\n      <input type="file" id="file-import" accept=".ndjson,.json,.txt" hidden>', 'id="btn-export"');
 
 /* ②′ 新增样式：加载更早的入口 + 来源房间标记（index.html 里的都不能手改，这里是唯一出处） */
 /* ★ 锚点必须是 legacy 里**本来就有**的那一行 —— 拿一个本次才加的选择器当锚点，
    第二次跑脚本时它已经不在了，替换会静默失效（我刚踩过：样式加完一 build 全没了）。 */
-html = html.replace('.notice b{color:#374151}',
+slot('NOTICE_B', '.notice b{color:#374151}',
   '.notice b{color:#374151}\n' +
   '.loadbtn{align-self:center;background:#fff;border:1px solid var(--line);border-radius:999px;padding:6px 14px;font-size:12.5px;color:#4b5563;cursor:pointer;user-select:none}\n' +
   '.loadbtn:active{background:#f1f3f7}\n' +
-  '.srctag{font-size:11px;color:#9aa1ad;background:#f4f5f8;border:1px solid #e8eaef;border-radius:999px;padding:0 6px;margin:0 4px}');
+  '.srctag{font-size:11px;color:#9aa1ad;background:#f4f5f8;border:1px solid #e8eaef;border-radius:999px;padding:0 6px;margin:0 4px}', '.loadbtn{');
 if(!/\.loadbtn\{/.test(html) || !/\.srctag\{/.test(html)) throw new Error('新增样式没注入成功：锚点变了？');
 
 /* ③ 进房页：加在 #app 之前（默认显示，进房成功后隐藏） */
@@ -111,7 +129,7 @@ const GATE = `
   </div>
 </div>
 `;
-html = html.replace('<div id="app">', GATE + '\n<div id="app" hidden>');
+slot('GATE', '<div id="app">', GATE + '\n<div id="app" hidden>', '<div id="gate">');
 
 /* ④ 进房页样式（追加到 </style> 前；不与 M2 的既有类重名） */
 const CSS = `
@@ -170,7 +188,9 @@ const CSS = `
 .mferr{min-height:15px;font-size:11.5px;color:var(--no);margin-top:4px}
 .mfnote{font-size:11px;color:var(--tx3);line-height:1.5;margin-top:2px}
 `;
-html = html.replace('</style>', CSS + '</style>');
+slot('GATE_CSS', '</style>', CSS + '</style>', '#gate{');
+/* ★ T6：六个 SLOT 必须全部执行到 —— 少跑一个就说明有人删了注入步骤 */
+if(SLOT_LOG.length !== 6) throw new Error('SLOT 数量异常：' + SLOT_LOG.length + '/' + 6 + '（' + SLOT_LOG.join(',') + '）');
 /* ★ 生成物必须自检：注入靠字符串替换，锚点一旦变了会**静默失效**（样式加完一 build 全没了）。
    上一次是标题被覆盖回去才发现 —— 这里把"注入成功"变成每次必验的事实。 */
 for(const need of ['#gate{', '.loadbtn{', '.mask{', '.mbtn.cancel{', '.mfilters{', '.mfchip.on{', 'TRPG · 骰娘在线']){
