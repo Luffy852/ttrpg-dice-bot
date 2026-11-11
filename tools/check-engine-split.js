@@ -153,5 +153,26 @@ console.log('== ⑤ 别名注册顺序快照（ESM 下顺序 = import 顺序） 
   ok('关键别名归属正确（int=智力 / inti=威吓 / 5.5e=dnd5r / 仪态=pre…）', wrong.length === 0, wrong.join(' / '));
 }
 
+console.log('== ⑥ ★ 单行 export 块（T4 · 拼接路与本自检对同一份源码必须同口径） ==');
+{
+  /* 【为什么必须有这条】load-engine.js 靠 `EXPORT_BLOCK_RE = /^\s*export\s*\{[^}]*\}\s*;.*$/`
+   *   **整行**剥掉 ESM 语法，多行的 `export {` 会漏掉后半截 → 拼接路直接留着 ESM 语法报语法错；
+   *   而本文件第 ② 项用 `/export\s*\{([^}]*)\}/` 能跨行匹配 → 它那边反而"一切正常"。
+   *   同一份源码被两个正则解释成两种结果，就是 §0.5 第 3 条那个口子。
+   *   H·5 第 2 步要求把它变成可执行断言，而不是一条注释。 */
+  const multi = [];
+  for (const f of files) {
+    const body = strip(src[f]);
+    for (const m of body.matchAll(/^\s*export\s*\{[^\n]*$/gm)) {
+      if (!/\}/.test(m[0])) multi.push(f + ' → ' + m[0].trim().slice(0, 60));
+    }
+  }
+  ok('★ ' + files.length + ' 个模块的 export {} 全是单行', multi.length === 0, multi.join(' / '));
+  // 自证不是摆设断言：喂一段多行 export，这条判据必须能抓到
+  const probe = 'export {\n  a,\n  b\n};\n';
+  const caught = [...probe.matchAll(/^\s*export\s*\{[^\n]*$/gm)].some(m => !/\}/.test(m[0]));
+  ok('★ lint 自己能抓到多行 export（回退即红）', caught);
+}
+
 console.log('\n拆包自检：' + (bad ? '❌ ' + bad + ' 项不通过' : '✅ 全通过'));
 process.exit(bad ? 1 : 0);

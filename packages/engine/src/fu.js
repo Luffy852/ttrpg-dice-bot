@@ -22,7 +22,8 @@ const FU_MEMO = [
 const FU_MEMO_KEYS = new Set(FU_MEMO.map(m => m.key));
 registerAliases(CHECK_DOMAIN.fu, FU_ATTRS.map(a => ({key:a.key, kind:'fuattr', zh:a.zh, en:a.en, display:a.zh, aliases:a.aliases})));
 registerAliases(CARD_DOMAIN.fu, FU_MEMO.map(m => ({key:m.key, kind:'fumemo', zh:m.zh, en:m.en, display:m.zh, aliases:m.aliases})));
-function fuMemoLabel(key){ const m = FU_MEMO.find(x => x.key === key); return m ? m.zh : key; }
+/* ★ T4：fuMemoLabel 是全仓无引用的真死代码（只在 legacy 内嵌脚本里有一份旧副本），
+ *   连同下面的导出项一起删；FU_MEMO / FU_MEMO_KEYS 仍被别名注册与 Engine 用到，保留。 */
 function judgeFu(v1, v2, dl, mod){
   mod = mod || 0;
   const sum = v1 + v2 + mod, hr = Math.max(v1, v2);
@@ -80,4 +81,4 @@ function lookupSkillOrAbility(name){
  *   verbs           —— ★M2 新增：规则专属动词（.dh / .fu）的处理函数表
  */
 
-export { FU_ATTRS, FU_TIERS, FU_DL_HINT, FU_MEMO, FU_MEMO_KEYS, fuMemoLabel, judgeFu, parseTier, lookupCheckTarget, lookupSkillOrAbility };
+export { FU_ATTRS, FU_TIERS, FU_DL_HINT, FU_MEMO, FU_MEMO_KEYS, judgeFu, parseTier, lookupCheckTarget, lookupSkillOrAbility };

@@ -24,7 +24,7 @@ function readRequired(file, desc){
   if(!fs.existsSync(file)){
     throw new Error('[load-engine] 缺少' + desc + '：' + file +
       '\n  → 生成物已从 Git 出库时，先跑 `npm run build:web`（或 `npm run check`，它会自动重建）；' +
-      '\n  → legacy 是构建输入 + 呈现类断言夹具，必须保留原文件名，不要删。');
+      '\n  → legacy/ 仍是 build-web-shell.mjs 的构建输入，必须保留原文件名，不要删。');
   }
   return fs.readFileSync(file, 'utf8');
 }
@@ -92,10 +92,14 @@ function loadEngine(){
   'DH_TRAITS, FU_ATTRS, FU_TIERS, ' +
   'GENERIC_PACK, DND_PACK, COC_PACK, DH_PACK, FU_PACK, renderMsg, fmtMod, sumArr, ' +
   'FU_MEMO, FU_MEMO_KEYS, takeOverR:null};')();
-  // ★ 源码级断言（§10/§14/§22）扫的就是这段：架构类断言扫引擎源码，呈现类（CSS）扫 legacy HTML
-  const legacy = path.join(ROOT, 'legacy', 'M2_骰娘单机可摸版.html');
-  const html = readRequired(legacy, 'legacy HTML（构建输入 / 呈现类断言夹具）');
-  return {Engine, HTML_SRC: code + '\n' + html, ENGINE_SRC: code, ORDER, SRC};
+  /* ★ T4（H·5 第 1 步）：呈现类断言不再拿 legacy 内嵌的单机前端脚本给生产背书。
+   *   旧口径 HTML_SRC = 引擎源码 + legacy 全文；那段脚本在生产环境根本不运行，
+   *   等于用历史快照锁住"看起来对"的断言（#18 的同一类盲区）。
+   *   新口径 = 引擎源码 + 生产 ui.js（绑定逻辑）+ 生成后的 index.html（CSS / DOM / 顶栏）。
+   *   两路与 test_engine_esm.mjs 必须同口径；缺生成物一律显式抛错，杜绝静默假绿。 */
+  const ui = readRequired(path.join(ROOT, 'apps', 'web', 'src', 'ui.js'), '前端呈现 apps/web/src/ui.js');
+  const shell = readRequired(path.join(ROOT, 'apps', 'web', 'index.html'), '生成物 apps/web/index.html');
+  return {Engine, HTML_SRC: code + '\n' + ui + '\n' + shell, ENGINE_SRC: code, ORDER, SRC};
 }
 
 module.exports = {loadEngine, buildEngineSource, ORDER, SRC};

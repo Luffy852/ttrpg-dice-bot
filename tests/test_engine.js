@@ -14,8 +14,9 @@
 *   前提下写的。拼接路保住"断言零改动"，真 ESM 路负责抓 TDZ / 循环依赖 / 漏 import。
 *   两路跑的是同一份断言，不是两套测试 —— 少跑一路就会漏掉一整类问题。
 *
-* 【M3 新增的源码级断言口径】HTML_SRC = 拼接后的引擎源码 + legacy/M2 的 html 全文，
-*   所以架构类（扫 cmd.js 写法）与呈现类（扫 CSS）断言都仍然有效。
+* 【T4 起的源码级断言口径】HTML_SRC = 拼接后的引擎源码 + 生产 ui.js + 生成后的 index.html。
+*   架构类（扫 cmd.js 写法）扫引擎源码；呈现类（CSS / 顶栏 / 绑定逻辑）扫**真正跑在生产里的**那两份。
+*   旧口径扫 legacy/M2 全文（内嵌单机前端脚本，生产根本不运行）—— 等于用历史快照给断言背书，已废。
 * ========================================================================== */
 const fs = require('fs');
 const path = require('path');
@@ -603,7 +604,12 @@ console.log('== 14. 真机反馈第三轮（通用降噪 / 底部文案 / 键盘
   ok('监听 visualViewport resize', /vv\.addEventListener\('resize'/.test(src));
   ok('监听 visualViewport scroll', /vv\.addEventListener\('scroll'/.test(src));
   ok('聚焦时多次重排对齐键盘动画', /\[0, 120, 320, 600\]/.test(src));
-  ok('发送后滚到底', /scrollToBottom\(\)/.test(src));
+  /* ★ T4：旧断言硬编码了 legacy 内嵌脚本的函数名 `scrollToBottom()`，
+   *   生产 ui.js 里同一个函数叫 `toBottom()` —— 这是"旧实现快照"而不是锁坑断言。
+   *   改成锁**接线**：发送按钮的 click 回调里必须真的调用滚到底函数（两种名字都认），
+   *   比原来"全文任何地方出现这个函数名"更严；新旧夹具双跑时两边都对得上。 */
+  const sendBind = (src.match(/\$send\.addEventListener\('click'[\s\S]{0,180}/) || [])[0] || '';
+  ok('发送后滚到底', /(toBottom|scrollToBottom)\(\)/.test(sendBind), sendBind.slice(0, 120));
 }
 
 console.log('== 15. 规则 × 角色卡 正交（通用下不再冒出 D&D 口径）★ 本轮 ==');
@@ -773,7 +779,10 @@ console.log('== 16. .rc list 挂规则层 + 顶栏裸骰开关 ==');
     eq('★ 不再有 toggle 特例分支', /b\.id === 'q-bd'/.test(src), false);
     eq('★ 不再有 q-bd 元素', /id="q-bd"/.test(src), false);
     // 所有按钮行为统一：都是填输入框
-    const bind = (src.match(/querySelectorAll\('\.quick'\)[\s\S]{0,300}/) || [])[0];
+    // ★ T4：生产 ui.js 写的是 querySelectorAll('.quick[data-cmd]')，legacy 内嵌脚本才是
+    //   querySelectorAll('.quick')。迁移到生产夹具后必须放宽选择器部分，但松紧度不变：
+    //   仍要求绑定段里出现 dataset.cmd、且不含 q-bd 特例分支；匹配不到就给空串，别抛异常。
+    const bind = (src.match(/querySelectorAll\('\.quick[^']*'\)[\s\S]{0,300}/) || [])[0] || '';
     ok('★ 所有快捷按钮行为一致（只填输入框）', /dataset\.cmd/.test(bind) && !/id === 'q-bd'/.test(bind), bind.slice(0, 120));
     ok('顶栏保留裸骰状态指示', /id="p-bd"/.test(src));
     const n = (src.match(/data-cmd="/g) || []).length;
