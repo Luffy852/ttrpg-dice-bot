@@ -39,8 +39,13 @@ export function createRoomCore(storage, opts){
   async function buildCtx(anonId, nick){
     const room = await storage.getRoom();
     const card = await storage.getCard(anonId);
-    // .h 只查我自己的最近投掷 —— 不把整个房间历史塞进内存
-    const rolls = await storage.recentRolls(anonId, IDLE_ROLLS);
+    /* .h 只查我自己的最近投掷 —— 不把整个房间历史塞进内存
+     * ★ 热修（房间 593353 线上事故）：传 **nick**，不是 anonId。
+     *   roll 结果是骰娘发的，落库时 `anon_id` 恒为 null（见本文件 apply 第 ⑤ 步：
+     *   `anon_id:(m.from === '骰娘' ? null : anonId)`），按 anon_id 查永远 0 条 →
+     *   .h 永远回「（还没有投掷记录）」。引擎侧本来就是按 `m.actor === me` 认「我的」，
+     *   这里与它同口径，历史消息（actor 有值、anon_id 为 null）也能立刻查回。 */
+    const rolls = await storage.recentRolls(nick, IDLE_ROLLS);
     const history = rolls.map(m => ({kind:m.kind, actor:m.actor, ts:m.ts, view:Engine.viewFromPayload(m.payload)}));
     /* ★ .status 的「本房间共 N 条」必须是**现存量 COUNT(*)**，不是 room.seq。
      * 【为什么】seq 是"已分配到的最大序号"，删除后不回退 —— 30 天清理删掉旧消息后，

@@ -132,6 +132,29 @@ console.log('== ③ Worker 侧不许踩的坑 ==');
   ok('★ /api/wsdiag 分支已移除', !/url\.pathname\s*===\s*'\/api\/wsdiag'/.test(gateway));
 }
 
+console.log('== ④ .h 的 recentRolls 口径（线上事故 · 房间 593353）==');
+/* 【为什么 ① 抓不到】① 只对齐「方法名集合」；三份实现当时方法名都在，
+ *   却**一致地**按 `anon_id = 玩家id` 查。roll 由骰娘发出、落库时 anon_id 恒为 null，
+ *   所以生产 + 两个测试替身一起错，check:all 全绿而真机 .h 恒空。
+ *   这里把「按什么字段查」也钉死：必须按 actor，且 core 调用处传 nick。 */
+{
+  const stripCmt = t => t.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(?<!:)\/\/[^\n]*/g, '');
+  const impls = {
+    'room.js（生产·DO）': read('apps/worker/src/room.js'),
+    'sqlite_storage.mjs（验 SQL）': read('tests/sqlite_storage.mjs'),
+    'memory_storage.mjs（验协议）': read('tests/memory_storage.mjs'),
+  };
+  for(const [name, src] of Object.entries(impls)){
+    const i = src.indexOf('recentRolls(');
+    const body = stripCmt(i < 0 ? '' : src.slice(i, i + 360));
+    ok('★ ' + name + ' 的 recentRolls 按 actor 过滤',
+      /actor\s*=\s*\?/.test(body) || /m\.actor\s*===\s*actor/.test(body), body.slice(0, 120));
+    ok('★ ' + name + ' 没有残留按 anon_id 过滤', !/anon_id/.test(body), body.slice(0, 120));
+  }
+  ok('★ core.js 调 recentRolls 传 nick（不是 anonId）',
+    /storage\.recentRolls\(nick,\s*IDLE_ROLLS\)/.test(coreSrc));
+}
+
 console.log('---------------------------');
 console.log('Worker 接口检查：通过 ' + pass + ' 项，失败 ' + fail + ' 项');
 process.exit(fail ? 1 : 0);

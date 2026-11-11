@@ -30,8 +30,9 @@ export function createMemoryStorage(code){
       for(const m of list){ msgs.push(m); bySeq.set(m.seq, m); }
       msgs.sort((x, y) => x.seq - y.seq);
     },
-    async recentRolls(anonId, n){
-      return msgs.filter(m => m.kind === 'roll' && m.anon_id === anonId).slice(-n);
+    /* ★ 与 room.js 同口径：按 actor 查（roll 的 anon_id 恒为 null，见 core.js apply）。 */
+    async recentRolls(actor, n){
+      return msgs.filter(m => m.kind === 'roll' && m.actor === actor).slice(-n);
     },
     /* ★ 现存量 COUNT(*) —— 与 room.seq 的区别：seq 删后不回退，清理后会虚高。
      *   这里是内存替身，直接用数组长度就是"现存量"（清理走 _deleteOlderThan，会同步删）。 */
