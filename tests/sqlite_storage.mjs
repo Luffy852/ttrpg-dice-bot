@@ -71,8 +71,9 @@ export function createSqliteStorage(db, code){
         'INSERT INTO messages (seq, id, ts, kind, from_name, actor, anon_id, req_id, rule_at, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         m.seq, m.id, m.ts, m.kind, m.from, m.actor || null, m.anon_id || null, m.req_id || null, m.rule_at || null, JSON.stringify(m.payload));
     },
-    async recentRolls(anonId, n){
-      return rows2msgs(q('SELECT * FROM messages WHERE kind = ? AND anon_id = ? ORDER BY seq DESC LIMIT ?', 'roll', anonId, n)).reverse();
+    /* ★ 与 room.js 同口径：按 actor 查（roll 的 anon_id 恒为 null，见 core.js apply）。 */
+    async recentRolls(actor, n){
+      return rows2msgs(q('SELECT * FROM messages WHERE kind = ? AND actor = ? ORDER BY seq DESC LIMIT ?', 'roll', actor, n)).reverse();
     },
     /* ★ 现存量 COUNT(*)，不用 room.seq —— seq 删后不回退，30 天清理后虚高。与 room.js 同构。 */
     async hasIds(ids){ const has = new Set(run('SELECT id FROM messages').map(r => r.id)); return new Set((ids || []).filter(i => has.has(i))); },

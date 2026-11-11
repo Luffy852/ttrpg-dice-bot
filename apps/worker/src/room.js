@@ -201,8 +201,13 @@ export class RoomDO extends DurableObject {
             m.req_id || null, m.rule_at || null, JSON.stringify(m.payload));
         });
       },
-      async recentRolls(anonId, n){
-        return q('SELECT * FROM messages WHERE kind = ? AND anon_id = ? ORDER BY seq DESC LIMIT ?', 'roll', anonId, n)
+      /* ★ 热修（房间 593353）：按 **actor** 查，不按 anon_id。
+       *   roll 结果由骰娘发出，core.js 落库时把它的 anon_id 设为 null（骰娘不是客户端），
+       *   所以 `WHERE anon_id = ?` 永远命中不了任何投掷 —— .h 恒回「还没有投掷记录」。
+       *   actor 存的是发起指令的玩家昵称，与 Engine 的 `m.actor === me` 是同一口径；
+       *   且历史数据本来就带 actor，修完旧记录立即可查，不需要回填数据、不动 DDL。 */
+      async recentRolls(actor, n){
+        return q('SELECT * FROM messages WHERE kind = ? AND actor = ? ORDER BY seq DESC LIMIT ?', 'roll', actor, n)
           .reverse().map(row2msg);
       },
       /* ★ 现存量 COUNT(*)，不是 room.seq —— seq 删后不回退，30 天清理后会让 .status 的

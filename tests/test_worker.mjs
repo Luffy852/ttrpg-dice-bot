@@ -339,6 +339,44 @@ console.log('== 11. ★ 真跑一遍"旧库 → 新代码"的迁移序列（sql.
   eq('★ 绑定参数写空串也能正常执行（无 DQS 歧义）', qerr, null);
 }
 
+console.log('== 12. ★★ .h 必须能查到刚掷的骰（线上事故 · 房间 593353）==');
+/* 【为什么单列一节】roll 结果是骰娘发的，core.js 落库时把它的 anon_id 设为 null；
+ *   而三份 storage 曾**一致地**按 `anon_id = 玩家id` 查 → 生产与两个测试替身一起错，
+ *   引擎单测又直接喂 ctx.history 绕过 storage，e2e 从没发过 .h ——
+ *   于是 830 条断言全绿、真机 .h 恒回「（还没有投掷记录）」。
+ *   这一节走 createRoomCore.apply() 真实链路，任一处口径漂回去就红。 */
+{
+  let t = 1772000000000;
+  const st = createMemoryStorage('593353');
+  const core = createRoomCore(st, {now: () => (t += 1000)});
+  const send = (id, text, anonId, nick) => core.apply({reqId:id, text, anonId, nick});
+  await send('h-q1', '.r 2d6+3', 'a1', '老王');
+  await send('h-q2', '.r 1d20',  'a1', '老王');
+
+  const rollRows = (await st.since(0, 100)).filter(m => m.kind === 'roll');
+  eq('★ 造出的正是历史数据形态（2 条 roll）', rollRows.length, 2);
+  ok('★ roll 的 anon_id 恒为 null、actor 是玩家（根因不复现就不算测到）',
+    rollRows.every(m => m.anon_id === null && m.actor === '老王'),
+    JSON.stringify(rollRows.map(m => ({anon_id:m.anon_id, actor:m.actor}))));
+
+  const a = await send('h-q3', '.h', 'a1', '老王');
+  const notice = a.msgs.find(m => m.kind === 'notice');
+  const html = a.msgs.find(m => m.kind === 'html');
+  ok('★ .h 不再回「（还没有投掷记录）」', !notice || !/还没有投掷记录/.test(notice.payload.html || ''),
+    notice && notice.payload.html);
+  ok('★ .h 列出「我最近 2 条投掷」', !!html && /我最近 2 条投掷/.test((html.payload.defs || {}).title || ''),
+    html && JSON.stringify(html.payload.defs).slice(0, 160));
+  ok('★ 最近一条排在最前（1d20 先于 2d6+3）',
+    !!html && /掷骰 1d20/.test(html.payload.defs.rows[0].k) && /2d6\+3/.test(html.payload.defs.rows[1].k),
+    html && JSON.stringify(html.payload.defs.rows));
+
+  /* 别人不该看到我的投掷 —— 防止把 .h 修成"全房最近投掷" */
+  const b = await send('h-q4', '.h', 'b2', '小李');
+  const bNotice = b.msgs.find(m => m.kind === 'notice');
+  ok('★ 他人 .h 仍是空（按 actor 隔离）', !!bNotice && /还没有投掷记录/.test(bNotice.payload.html || ''),
+    bNotice && bNotice.payload.html);
+}
+
 console.log('---------------------------');
 console.log('Worker 纯逻辑：通过 ' + pass + ' 项，失败 ' + fail + ' 项');
 console.log('⚠️  未验（只能你部署后验）：room.js 的 DO 行为 / index.js 路由 / wrangler 配置 / 真实 ws');
