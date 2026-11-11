@@ -10,8 +10,9 @@
  *
  * 【不做乐观更新】规则/昵称/裸骰的显示一律等 state 帧回写（core 返回什么就显示什么）。
  * ========================================================================== */
-import {IN, OUT, PROTOCOL_VERSION} from '../vendor/protocol/frames.js';
+import {IN, PROTOCOL_VERSION} from '../vendor/protocol/frames.js';
 import {makeReqId, makeClientId, backoff, cursorOf} from '../vendor/protocol/cursor.js';
+import {createFrameRouter} from './frame-route.js';
 
 const HB_MS = 20000;        // 心跳间隔（服务端 45s 无帧断开）
 const PAGE = 200;           // 首屏 / 翻页条数
@@ -72,31 +73,33 @@ export function createNet({code, token, nick, on = {}, backoffBase = 1000}){
     ws.onerror = () => {};                 // 错误统一走 onclose 重连，不额外处理
   }
 
-  function route(f){
-    if(f.t === OUT.WELCOME) return on.welcome && on.welcome(f);
-    if(f.t === OUT.BATCH){
+  /* ★ T3a：帧名 → 谁来处理，全项目只有 frame-route.js 那一张表。
+   *   生产（这里）与 tests/dom_smoke.js 调同一个 createFrameRouter()，不再各写一份 if 链
+   *   —— 坑 #18「测试替身抄对了、生产写错 → 全绿却真机全废」的根子就在这儿。
+   *   功能开发轮加 INIT 帧时，只需在 frames.js 的 OUT 加值 + 在表里注册，
+   *   tools/check-frame-route.mjs 会强制全覆盖，漏接即红。 */
+  const route = createFrameRouter({
+    welcome(f){ return on.welcome && on.welcome(f); },
+    batch(f){
       if(f.msgs && f.msgs.length){
         /* ★ 上翻来的历史**不能**推进 cursor：cursor 是"我已连续渲染到哪"的水位，
-         *   只用于重连补齐。把更早的消息算进去会让它空涨，重连时反而漏掉中间段。
-         *   isHistory 帧（oldest 存在且不是最新那条）单独标记，交给 UI 插到顶部。 */
+         *   只用于重连补齐。把更早的消息算进去会让它空涨，重连时反而漏掉中间段。 */
         const isHistory = f.why === 'page';
         if(!isHistory) cursor = Math.max(cursor, cursorOf(f.msgs));
         on.batch && on.batch(f.msgs, f.cursor, f.has_more,
           {why:f.why || 'live', oldest:f.oldest, total:f.total, hasMoreOlder:!!f.has_more});
       }
-      return;
-    }
-    /* ★ 整房重载：导入战报后整房按时间重排了，本地的游标与去重集合全部失效。
-     *   必须由服务端主动喊一声 —— 客户端不可能自己知道"顺序被改了"。 */
-    if(f.t === OUT.RELOAD){ cursor = 0; return on.reload && on.reload(f); }
-    if(f.t === OUT.ACK)     return on.ack && on.ack(f.req_id, f.seq);
-    if(f.t === OUT.DUP)     return on.dup && on.dup(f.req_id, f.seq, f.deleted);
-    if(f.t === OUT.REJECT)  return on.reject && on.reject(f.req_id, f.code);
-    if(f.t === OUT.STATE)   return on.state && on.state(f.room);
+    },
+    ack(f){ return on.ack && on.ack(f.req_id, f.seq); },
+    dup(f){ return on.dup && on.dup(f.req_id, f.seq, f.deleted); },
+    reject(f){ return on.reject && on.reject(f.req_id, f.code); },
+    state(f){ return on.state && on.state(f.room); },
     /* ★ online（当前 ws 连接数）与 total（累计人次）一起透传 —— 顶栏要分开显示两个数 */
-    if(f.t === OUT.PRESENCE)return on.presence && on.presence(f.members, f.online, f.total);
-    if(f.t === OUT.ERROR)   return on.error && on.error(f.code);
-  }
+    presence(f){ return on.presence && on.presence(f.members, f.online, f.total); },
+    error(f){ return on.error && on.error(f.code); },
+    /* ★ 整房重载：导入战报后整房按时间重排了，本地的游标与去重集合全部失效。 */
+    reload(f){ cursor = 0; return on.reload && on.reload(f); },
+  });
 
   function beat(){ stopBeat(); hb = setInterval(() => { if(ws && ws.readyState === 1) ws.send(JSON.stringify({t:IN.PING, ts:Date.now()})); }, HB_MS); }
   function stopBeat(){ if(hb) clearInterval(hb); hb = null; }
