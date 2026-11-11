@@ -36,11 +36,20 @@ enabled = true
 # PIN_SECRET 在 Cloudflare 网页端设置（Settings → Variables and Secrets），不进仓库、不进前端
 
 # ★ T1 预览路径（2026-11-11）：Workers Builds 对非生产分支默认执行
-#   `npx wrangler preview`（open beta），该命令硬性要求 Wrangler 配置里存在 previews 块，
-#   缺了就报 "Your Wrangler configuration is missing a `previews` block" 并终止构建。
-#   空块 = 预览不需要单独设置，沿用上面的顶级配置（name / main / assets / ROOM / 迁移）。
-#   ★ 不要往这里写 PIN_SECRET：密钥只在 Cloudflare 网页端设置，从不进仓库。
-#   ★ 不要在 previews 里声明任何 KV 命名空间：500 MB 全局 KV 清理方案已取消，
-#     线上残留的 dicebot_usage_monitor 绑定已删除，不把它固化回仓库。
+#   `npx wrangler preview`（open beta），该命令硬性要求 Wrangler 配置里存在 previews 块。
+#   assets / compatibility_date / classes / migrations 保持顶层即可；
+#   但「运行时绑定」不继承生产设置，凡代码通过 env.X 读取的都要在本块里再声明一次。
+#   ★ 密钥只在 Cloudflare 网页端设置，从不写进本文件。
 #   ★ 本块只影响预览构建；wrangler deploy（生产 main）行为不变。
 [previews]
+
+# ★★ 预览必须有 ROOM 绑定，否则建房必 500 ★★
+#   apps/worker/src/index.js 的 stubOf = (env, code) => env.ROOM.get(env.ROOM.idFromName(code))，
+#   是「通过 env 读取」的用法。Previews 不继承顶层 [[durable_objects.bindings]]，
+#   空 previews 块会让预览实例拿到 env.ROOM === undefined → POST /api/room 抛异常 → HTTP 500。
+#   class_name 与顶层一致；[[migrations]] 保持顶层，Cloudflare 会为每个 Preview
+#   自动 provision 独立的 DO namespace（预览房间数据与生产完全隔离）。
+#   官方口径：Add previews.durable_objects.bindings only if your code reads the binding from env.
+[[previews.durable_objects.bindings]]
+name = "ROOM"
+class_name = "RoomDO"
