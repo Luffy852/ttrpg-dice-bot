@@ -23,13 +23,24 @@ const WEB = path.join(ROOT, 'apps', 'web');
 
 let html = fs.readFileSync(LEGACY, 'utf8');
 
-/* ① 删掉引擎 + 单机前端的整段 script */
-const s0 = html.indexOf('<script>');
-const s1 = html.indexOf('</script>', s0);
-if(s0 < 0 || s1 < 0) throw new Error('legacy 里找不到 <script> 块');
-html = html.slice(0, s0) +
+/* ① 把「单机前端 script 的位置」换成联网版的 module 入口
+ * ★ T5（legacy 瘦身）：legacy 内嵌的 89,102 B 单机前端已在 T5 删除，
+ *   老逻辑 `indexOf('<script>')` 会直接找不到 → 抛错 → 部署期 Build 崩。
+ *   现在改用**锚点注释**：那行注释正好留在旧 script 块的位置，替换后
+ *   生成的 index.html 与 T4a 后**逐字节一致**（见下 §④ 自检与 T5 校验记录）。
+ *   【为什么还要禁 <script】legacy 从此只作 CSS/DOM 呈现夹具；把单机前端加回来
+ *   会变成「两套前端并存」，而拼接路断言早已不看它（T4 已迁到生产 ui.js）。
+ *   显式抛错比静默生成一份混了旧引擎的页面安全得多。 */
+const ANCHOR = '<!-- BUILD_ANCHOR · 本行由 tools/build-web-shell.mjs 替换为 module 入口；T5 起 legacy 只留 CSS/DOM，禁止再放可执行 JS -->';
+if(/<script[\s>]/i.test(html)){
+  throw new Error('legacy 里残留 <script>：T5 起它只能是纯 CSS/DOM 夹具，不能带可执行 JS（会把单机前端混进生成物）');
+}
+const a0 = html.indexOf(ANCHOR);
+if(a0 < 0) throw new Error('legacy 里找不到 BUILD_ANCHOR 注释：瘦身后锚点丢了？');
+if(html.indexOf(ANCHOR, a0 + 1) >= 0) throw new Error('legacy 里出现多个 BUILD_ANCHOR：module 入口会被注入两次');
+html = html.slice(0, a0) +
   '<script type="module" src="./src/main.js"></script>' +
-  html.slice(s1 + '</script>'.length);
+  html.slice(a0 + ANCHOR.length);
 
 /* ② 标题：这是**联网版**，不是单机版 —— 标签页标题与顶栏都要改
  *  ★ 必须改在这里而不是手改 index.html：index.html 是**生成物**，
@@ -164,6 +175,14 @@ html = html.replace('</style>', CSS + '</style>');
    上一次是标题被覆盖回去才发现 —— 这里把"注入成功"变成每次必验的事实。 */
 for(const need of ['#gate{', '.loadbtn{', '.mask{', '.mbtn.cancel{', '.mfilters{', '.mfchip.on{', 'TRPG · 骰娘在线']){
   if(!html.includes(need)) throw new Error('注入失败：index.html 里找不到 ' + need + '（锚点变了？）');
+}
+/* ★ T5 新增：module 入口恰好一个，且生成物里绝不能混进 legacy 的单机前端。
+ *   锚点替换一旦失效（比如有人改了注释文案），旧前端就可能以某种形式漏进来 ——
+ *   `function scrollToBottom` / `await source.send` 是那段脚本独有的特征串。 */
+const moduleEntries = (html.match(/<script type="module" src="\.\/src\/main\.js"><\/script>/g) || []).length;
+if(moduleEntries !== 1) throw new Error('module 入口数量异常：' + moduleEntries + '（应为 1）');
+if(/function scrollToBottom|await source\.send|ENGINE-START/.test(html)){
+  throw new Error('生成物里混进了 legacy 单机前端：锚点替换没生效？');
 }
 
 /* ★ 把 packages/ 复制进前端目录 vendor/（M3 部署踩坑后补）
