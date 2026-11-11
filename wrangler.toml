@@ -34,3 +34,13 @@ new_sqlite_classes = ["RoomDO"]
 enabled = true
 
 # PIN_SECRET 在 Cloudflare 网页端设置（Settings → Variables and Secrets），不进仓库、不进前端
+
+# ★ T1 预览路径（2026-11-11）：Workers Builds 对非生产分支默认执行
+#   `npx wrangler preview`（open beta），该命令硬性要求 Wrangler 配置里存在 previews 块，
+#   缺了就报 "Your Wrangler configuration is missing a `previews` block" 并终止构建。
+#   空块 = 预览不需要单独设置，沿用上面的顶级配置（name / main / assets / ROOM / 迁移）。
+#   ★ 不要往这里写 PIN_SECRET：密钥只在 Cloudflare 网页端设置，从不进仓库。
+#   ★ 不要在 previews 里声明任何 KV 命名空间：500 MB 全局 KV 清理方案已取消，
+#     线上残留的 dicebot_usage_monitor 绑定已删除，不把它固化回仓库。
+#   ★ 本块只影响预览构建；wrangler deploy（生产 main）行为不变。
+[previews]

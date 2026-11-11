@@ -136,9 +136,12 @@ async function renderOf(m) {
 /* ========================================================================== */
 console.log('== 0. 环境 ==');
 {
-  const d = await (await fetch(BASE + '/api/diag?code=000000')).text();
-  ok('workerd 活着', /Worker/.test(d));
-  ok('ROOM 绑定存在', /ROOM 绑定\s*: 已绑定/.test(d));
+  /* ★ T1：两个无鉴权诊断端点已移除，探活改走真实建房路径。
+   *   Worker 活着 + ROOM 绑定可用，由一次 POST /api/room 是否返回 6 位房间号证明；
+   *   绑定缺失时会 500，r.json() 直接抛错，与原先的「看诊断页」等价但不依赖被删端点。 */
+  const probe = await createRoom();
+  ok('workerd 活着', /^\d{6}$/.test(probe.code || ''), JSON.stringify(probe));
+  ok('ROOM 绑定存在', /^\d{6}$/.test(probe.code || ''), JSON.stringify(probe));
 }
 
 console.log('\n== 1. 建房 → 进房 → ws 连通 → 掷骰 ==');

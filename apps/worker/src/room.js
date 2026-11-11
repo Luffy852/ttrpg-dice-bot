@@ -116,6 +116,12 @@ export class RoomDO extends DurableObject {
     /* ★ 同上：老房间不会自动长出 keep_until 列 —— 缺了它续期就是空的，
      *   而续期是本轮的主功能，不能只在新建的房间里有效。 */
     try{ this.sql.exec('ALTER TABLE messages ADD COLUMN keep_until INTEGER'); }catch(e){ /* 列已存在 */ }
+    /* ★ T1：room.notified_clean 列漂移。TABLES 里的新定义只对**新建**房间生效，
+     *   「该列加入前已建表」的旧房间仍缺列；alarm 进入提前 7 天提醒分支时
+     *   UPDATE room SET notified_clean = 1 会抛 no such column，
+     *   连带清理 / 半开连接巡检 / 闹钟续排整段中断（SQLite 已复现）。
+     *   ★ 只补列，不碰提醒语义、不改造 alarm、不加 reset_at。 */
+    try{ this.sql.exec('ALTER TABLE room ADD COLUMN notified_clean INTEGER NOT NULL DEFAULT 0'); }catch(e){ /* 列已存在 */ }
     /* ★ 逐条建且不让它炸：索引只是加速，缺了最多变慢；而构造函数抛异常 =
      *   这个房间**彻底打不开**（HTTP 500 + ws 1006，009950 就是这样挂的）。
      *   顺序（ALTER 之后）已经保证了正常路径，这里是最后一道保险。 */
