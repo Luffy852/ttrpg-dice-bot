@@ -15,11 +15,10 @@
  *   tools/check-worker.mjs 会扫这个（两边漂移 = 沙盒里全绿、线上全错）。
  * ========================================================================== */
 import {DurableObject} from 'cloudflare:workers';
-import {createRoomCore} from './core.js';
+import {createRoomCore, planImport, mergeOrder} from './core.js';
 import {checkIn, IN, ERR, OUT} from '../../../packages/protocol/src/frames.js';
 import {exportAs, FORMAT, fromNdjson, buildFilterClause} from './export.js';
 import {parseFilters, filterSummary, hasFilters} from '../../../packages/protocol/src/export-filter.js';
-import {planImport, mergeOrder} from './core.js';
 import {ymdhm, esc} from '../../../packages/engine/src/util.js';
 import {verifyToken, verifyPin, newSalt, hashPin, signToken, TOKEN_TTL} from './auth.js';
 
@@ -85,8 +84,9 @@ export const INDEXES = [
 /** 兼容旧名（tools/check-worker.mjs 与其它引用） */
 export const SCHEMA = TABLES.concat(INDEXES);
 
-/** 战报消息的来源房间号：id 形如 `code:seq`，前缀就是它出生的房间 */
-export function srcRoomsOf(msgs){
+/** 战报消息的来源房间号：id 形如 `code:seq`，前缀就是它出生的房间
+ *  ★ T4：只在本文件内用（导入留痕），不再对外导出 —— 去掉 export 关键字，函数体一字不动。 */
+function srcRoomsOf(msgs){
   const out = new Set();
   (msgs || []).forEach(m => { const c = String(m.id || '').split(':')[0]; if(/^\d{6}$/.test(c)) out.add(c); });
   return [...out];

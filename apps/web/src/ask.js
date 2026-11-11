@@ -20,8 +20,9 @@ export const EXPORT_CHOICES = [
   {value:'ndjson', label:'NDJSON',        desc:'给机器读：可再用「导入战报」灌回房间'},
 ];
 
-/** 骰娘 / 系统消息也是一个可筛的"参与者"（from_name = '骰娘'） */
-export const BOT_SENDER = '骰娘';
+/** 骰娘 / 系统消息也是一个可筛的"参与者"（from_name = '骰娘'）
+ *  ★ T4：只在本文件内用（导出弹窗的参与者列表），不再对外导出。 */
+const BOT_SENDER = '骰娘';
 
 /**
  * 纯函数：把一次导出拼成 URL。

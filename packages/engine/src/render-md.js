@@ -11,10 +11,9 @@
  *
  * 【不做什么】不产出 HTML、不管时间格式以外的本地化、不做分页 —— 那是 apps/worker/export.js 的事。
  * ========================================================================== */
-import {detailLines} from './render.js';
+import {detailLines, defsHtml} from './render.js';
 import {fmtMod, hhmm, ymd} from './util.js';
 import {viewFromPayload} from './replay.js';
-import {defsHtml} from './render.js';
 
 /** 一颗骰：采用的 `7`，被丢弃的 ~~9~~（与 HTML 里 .chip.drop 划掉同一个语义） */
 function chipMd(c){ return c.drop ? ('~~' + c.v + '~~') : ('`' + c.v + '`'); }
@@ -35,8 +34,9 @@ function lineMd(L){
   return '';
 }
 
-/** view → 明细行数组（Markdown）。导出与详情面板都用它 */
-export function rollDetailMd(view){
+/** view → 明细行数组（Markdown）。导出与详情面板都用它
+ *  ★ T4：只在本文件内被 renderRollMd 调用，不再对外导出（函数体一字不动）。 */
+function rollDetailMd(view){
   return detailLines(view).map(lineMd).filter(Boolean);
 }
 
@@ -48,7 +48,7 @@ function verdictMd(vd){
 }
 
 /** 一条 roll 消息 → Markdown（首行结论 + 缩进明细） */
-export function renderRollMd(m){
+function renderRollMd(m){
   const v = m.view;
   const head = '**' + (v.title || '掷骰') + '** → `' + v.total + '`' +
     (v.mode ? ('（' + (v.mode === 'adv' ? '优势' : '劣势') + '）') : '') +
@@ -61,7 +61,7 @@ export function renderRollMd(m){
 }
 
 /** 任意消息 → Markdown（导出时按 kind 派发；与 renderMsg 是同一套映射的两种外壳） */
-export function renderMsgMd(m){
+function renderMsgMd(m){
   if(!m) return '';
   if(m.kind === 'roll') return renderRollMd(m);
   if(m.kind === 'sys')    return '> **' + (m.title || '') + '** ' + (m.line1 || '') + (m.line2 ? ('（' + m.line2 + '）') : '');
@@ -80,7 +80,7 @@ export function renderMsgMd(m){
 }
 
 /** defs（结构化说明）→ Markdown。与 defsHtml 是同一份数据的两种外壳（原则 4） */
-export function defsMd(m){
+function defsMd(m){
   const d = (m && (m.defs || (m.payload && m.payload.defs))) || null;
   if(!d) return '';
   const strip = h => String(h || '').replace(/<br\s*\/?>/g, ' ').replace(/<[^>]+>/g, '')
@@ -160,4 +160,7 @@ export function renderBattleMd(msgs, meta){
   return head.concat(body).join('\n') + '\n';
 }
 
-export {hhmmMd, ymdMd, lineMd, chipsMd};
+/* ★ T4：原 `export {hhmmMd, ymdMd, lineMd, chipsMd};` 已删 —— 这四个只在
+ *   本文件内部用（战报头 / 明细行），没有任何外部 import。
+ *   ★ 保留的两个 export 不能动：toRenderable 被 apps/web/src/ui.js 经 vendor 引用，
+ *     renderBattleMd 被 apps/worker/src/export.js 引用 —— 删了整条渲染/导出链就断。 */

@@ -25,7 +25,9 @@ const i = all.lastIndexOf('\nlet pass = 0, fail = 0;') + 1;
 if (i < 0) { console.error('❌ test_engine.js 里找不到断言主体起点（let pass = 0）'); process.exit(1); }
 const body = all.slice(i);
 
-// HTML_SRC：架构类断言扫引擎源码，呈现类断言（CSS）扫 legacy html —— 与拼接路口径一致。
+// ★ T4（H·5 第 1 步）：HTML_SRC 与拼接路同口径 —— 架构类断言扫引擎源码，
+//   呈现类断言（CSS / 顶栏 / 绑定逻辑）扫**生产** ui.js + 生成后的 index.html，
+//   不再扫 legacy 内嵌脚本（那段在生产里根本不运行）。
 // 顺序必须按 index.js 的 export 顺序（= 别名注册顺序），不能按字母序。
 const SRC = path.join(ROOT, 'packages', 'engine', 'src');
 const ORDER = fs.readFileSync(path.join(SRC, 'index.js'), 'utf8')
@@ -37,8 +39,17 @@ let HTML_SRC = ORDER.map(n => '\n/* ==== ' + n + '.js ==== */\n' +
   fs.readFileSync(path.join(SRC, n + '.js'), 'utf8').split('\n')
     .map(l => IMPORT_RE.test(l) || EXPORT_BLOCK_RE.test(l) ? null : l.replace(EXPORT_DECL_RE, '$1'))
     .filter(l => l !== null).join('\n')).join('\n');
-const legacy = path.join(ROOT, 'legacy', 'M2_骰娘单机可摸版.html');
-if (fs.existsSync(legacy)) HTML_SRC += '\n' + fs.readFileSync(legacy, 'utf8');
+/* ★ T4：顺手收口上一轮登记的「existsSync 静默兜底」—— 缺文件不许悄悄跑空断言。
+ *   与 tools/load-engine.js 的 assertGeneratedAssets / readRequired 同一个口径。 */
+const uiSrc = path.join(ROOT, 'apps', 'web', 'src', 'ui.js');
+const shell = path.join(ROOT, 'apps', 'web', 'index.html');
+for (const [p, what] of [[uiSrc, 'apps/web/src/ui.js'], [shell, '生成物 apps/web/index.html']]) {
+  if (!fs.existsSync(p)) {
+    console.error('❌ [test_engine_esm] 缺少 ' + what + '：先跑 `npm run build:web`（生成物已从 Git 出库）');
+    process.exit(1);
+  }
+  HTML_SRC += '\n' + fs.readFileSync(p, 'utf8');
+}
 
 const FOUND = {path:'packages/engine/src/index.js', name:'packages/engine (ESM)', stale:false};
 

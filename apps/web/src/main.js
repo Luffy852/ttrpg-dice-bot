@@ -260,7 +260,6 @@ function bindGate(){
         $('c-pin').textContent = p1;
         $('g-created').hidden = false;
         $('g-new').hidden = true;
-        $('created-code') && 0;
         window.__pending = {code:j.code, nick, pin:p1};
       }catch(e){ $('g-err').textContent = '创建失败：' + e.message; }
     }else{
