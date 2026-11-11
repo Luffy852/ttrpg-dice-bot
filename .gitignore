@@ -6,3 +6,5 @@ node_modules/
 apps/worker/dist/
 .env
 .env.*
+apps/web/index.html
+apps/web/vendor/
