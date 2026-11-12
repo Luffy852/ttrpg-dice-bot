@@ -17,6 +17,8 @@
 import {DurableObject} from 'cloudflare:workers';
 import {createRoomCore, planImport, mergeOrder} from './core.js';
 import {checkIn, IN, ERR, OUT} from '../../../packages/protocol/src/frames.js';
+import {runLifecycle, nextAlarmAt, RESET_SQL, resetFrames, SQL_MAX_EXPIRY, SQL_MIN_EXPIRY,
+  SQL_COUNT_CONTENT} from './lifecycle.js';
 import {exportAs, FORMAT, fromNdjson, buildFilterClause} from './export.js';
 import {parseFilters, filterSummary, hasFilters} from '../../../packages/protocol/src/export-filter.js';
 import {ymdhm, esc} from '../../../packages/engine/src/util.js';
@@ -31,9 +33,10 @@ const cut0 = () => Date.now() - KEEP_DAYS * DAY;
  * 【做法】每条 ws 在 attachment 上记最后一次收到帧的时间；巡检超过 IDLE_MS 就主动关掉。
  * 【为什么是 3 分钟】前端每 20 秒发一次心跳，留 9 倍余量 —— 弱网重传不会误伤挂机的人。 */
 const IDLE_MS  = 3 * 60 * 1000;
-const SWEEP_MS = 60 * 1000;        // 巡检间隔：小于 IDLE_MS 太多会白跑，大于会延迟回落
-const KEEP_DAYS = 30;          // 房间消息留存
-const WARN_DAYS = 23;          // 到期前 7 天提醒（档案：清理动作必须告知，不能静默）
+const KEEP_DAYS = 30;          // 房间消息留存（导出续期窗口 / 导入"已过期"判定用）
+/* ★ S2 还原路径独立步骤：巡检间隔 SWEEP_MS、提醒提前量 WARN_MS、到期窗口 KEEP_MS
+ *   全部迁到 lifecycle.js（alarm 决策的单一源）。这里不再留旧 WARN_DAYS=23 的
+ *   「now − created_at > 23d 且只置一次」判定 —— 那是 G·8.5 坑 3 要重做的旧口径。 */
 
 /* ★ schema 的唯一出处是 schema.sql（含注释与理由）；这里是它的运行时副本。
    tools/check-worker.mjs 会比对两者是否一致 —— 不能只在其中一处改。 */
@@ -42,7 +45,8 @@ export const TABLES = [
      id INTEGER PRIMARY KEY CHECK (id = 1), code TEXT NOT NULL, created_at INTEGER NOT NULL,
      last_active INTEGER NOT NULL, rule TEXT NOT NULL DEFAULT 'generic', baredice INTEGER NOT NULL DEFAULT 0,
      rule_set_by TEXT, rule_set_at INTEGER, pin_hmac TEXT, pin_salt TEXT,
-     seq INTEGER NOT NULL DEFAULT 0, notified_clean INTEGER NOT NULL DEFAULT 0, ver INTEGER NOT NULL DEFAULT 1)`,
+     seq INTEGER NOT NULL DEFAULT 0, notified_clean INTEGER NOT NULL DEFAULT 0,
+     reset_at INTEGER, warned_for_reset_at INTEGER, ver INTEGER NOT NULL DEFAULT 1)`,
   /* ★ cid = 客户端长期身份键（2026-10-31 真机反馈 · B 组）
    *   以前每次 /join 都现发一个随机 anon_id —— 关页重进就是"另一个人"，
    *   角色卡、昵称全部丢失。现在客户端在浏览器本地存一个 cid（见 apps/web/src/main.js），
@@ -144,6 +148,11 @@ export class RoomDO extends DurableObject {
      *   连带清理 / 半开连接巡检 / 闹钟续排整段中断（SQLite 已复现）。
      *   ★ 只补列，不碰提醒语义、不改造 alarm、不加 reset_at。 */
     try{ this.sql.exec('ALTER TABLE room ADD COLUMN notified_clean INTEGER NOT NULL DEFAULT 0'); }catch(e){ /* 列已存在 */ }
+    /* ★ S2 还原路径独立步骤：两条锚点列。旧房间补成 NULL —— 语义正好是「空房间 / 无预计清空时刻」，
+     *   不会凭空给老房间续命；下一次用户动作（发指令 / 导出 / 导入）才会写入真实 reset_at。
+     *   ★ 只在补列，不在这里排闹钟（L6：构造函数不许无条件 setAlarm）。 */
+    try{ this.sql.exec('ALTER TABLE room ADD COLUMN reset_at INTEGER'); }catch(e){ /* 列已存在 */ }
+    try{ this.sql.exec('ALTER TABLE room ADD COLUMN warned_for_reset_at INTEGER'); }catch(e){ /* 列已存在 */ }
     /* ★ 逐条建且不让它炸：索引只是加速，缺了最多变慢；而构造函数抛异常 =
      *   这个房间**彻底打不开**（HTTP 500 + ws 1006，009950 就是这样挂的）。
      *   顺序（ALTER 之后）已经保证了正常路径，这里是最后一道保险。 */
@@ -353,16 +362,22 @@ export class RoomDO extends DurableObject {
       const row = this.sql.exec('SELECT nick FROM members WHERE anon_id = ?', anonId).toArray()[0] || {};
       const myNick = row.nick || wantNick || '玩家';
       const token = await signToken({code:room.code, anon_id:anonId, exp:Math.floor(now / 1000) + TOKEN_TTL}, this.env.PIN_SECRET);
+      /* ★ L6：重新 arm 只放在明确的用户请求路径；join 只 arm、**不刷新 reset_at**
+       *   （进房是纯访问，口径 9；members 是辅助表，不参与计时）。记账失败不阻断进房。 */
+      try{ await this.armFromUserAction(); }catch(e){ /* 记账失败不影响进房 */ }
       /* ★ nick 必须回传：前端拿它当"我是谁"，否则又会与服务端各说一套 */
       return Response.json({token, anon_id:anonId, rule:room.rule, nick:myNick});
     }
 
     if(url.pathname === '/meta'){
-      const room = this.sql.exec('SELECT rule, baredice, created_at, seq, pin_hmac FROM room WHERE id = 1').toArray()[0];
+      const room = this.sql.exec('SELECT rule, baredice, created_at, seq, pin_hmac, reset_at FROM room WHERE id = 1').toArray()[0];
       const members = this.sql.exec('SELECT anon_id, nick FROM members ORDER BY joined_at').toArray();
       if(!room) return Response.json({error:'no_room'}, {status:404});
+      /* ★ reset_at 是房间字段、不是聊天消息：后续「本房间内容将重置」横幅读它（G·8.4 ①）。
+       *   纯读 /meta 不刷新锚点、不续活（口径 9）。 */
       return Response.json({code:this.code, rule:room.rule, baredice:!!room.baredice,
-        has_pin:!!room.pin_hmac, members, msg_seq:room.seq, created_at:room.created_at});
+        has_pin:!!room.pin_hmac, members, msg_seq:room.seq, created_at:room.created_at,
+        reset_at:room.reset_at ?? null});
     }
 
     if(url.pathname === '/history'){
@@ -444,6 +459,8 @@ export class RoomDO extends DurableObject {
         /* 没重排 → 不强制刷新（用户已定口径），只把这条提示 live 追加给在线的人 */
         this.broadcast({t:OUT.BATCH, msgs:[notice], cursor:seq});
       }
+      /* ★ 导入是用户动作：新增 notice + 续期一批 → 刷新 reset_at（口径 4 / G·8.3）。 */
+      try{ await this.refreshAnchor(); }catch(e){ /* 记账失败不影响导入 */ }
       return Response.json({imported:added, skipped:plan.skipped, errors:parsed.errs,
         total, rescued, from, cap:capNote(total)});
     }
@@ -489,6 +506,9 @@ export class RoomDO extends DurableObject {
        * 【v1 兼容】这条 COUNT 与升级前逐字一致，无筛选时数字不变。 */
       const renewed = this.sql.exec('SELECT COUNT(*) AS c FROM messages WHERE keep_until = ?',
         until).toArray()[0].c;
+      /* ★ 导出是「我还要这些内容」的明确动作：续期后 reset_at 后推、横幅消失（G·8.4 ①）。
+       *   reset_at 只由用户动作刷新，alarm 绝不写（G·8.3）。记账失败不影响导出回包。 */
+      try{ await this.refreshAnchor(); }catch(e){ /* 记账失败不影响导出 */ }
       const out = exportAs(all, {code:this.code, rule:room.rule,
         /* ★ 与消息时间同一个 UTC+8 格式化器：原来用 toISOString（UTC），
          *   同一份战报里"导出时间"与"消息时间"差 8 小时（真机反馈 · 第 6 条）。 */
@@ -526,7 +546,9 @@ export class RoomDO extends DurableObject {
        *   排闹钟、更新 last_seen / last_active 都只是记账，丢一次无所谓；
        *   真正的准入校验（token / 房间号）在上面，绝不能包进 try。 */
       try{
-        this.ctx.storage.setAlarm(Date.now() + SWEEP_MS);
+        /* ★ L6 / G·8.5：不再无条件 setAlarm。armFromUserAction 用 getAlarm() 判重，
+         *   只在需要提前时覆盖；空房间自然不排（口径 8）。ws 握手是明确的用户请求路径。 */
+        await this.armFromUserAction();
         this.sql.exec('UPDATE members SET last_seen = ? WHERE anon_id = ?', Date.now(), v.payload.anon_id);
         this.sql.exec('UPDATE room SET last_active = ? WHERE id = 1', Date.now());
       }catch(e){ /* 记账失败不影响进房 */ }
@@ -551,10 +573,13 @@ export class RoomDO extends DurableObject {
       const room = await this.storage().getRoom();
       const me = this.sql.exec('SELECT nick FROM members WHERE anon_id = ?', anonId).toArray()[0] || {};
       const mem = this.members();
+      const anchor = this.sql.exec('SELECT reset_at FROM room WHERE id = 1').toArray()[0] || {};
       /* ★ 库里的 nick 优先于客户端自报的：客户端自报可能是默认"玩家"，
-       *   而库里才是这个身份真正的昵称（与 .status / 成员列表同源）。 */
+       *   而库里才是这个身份真正的昵称（与 .status / 成员列表同源）。
+       *   reset_at 是房间字段（非聊天消息）：进房/刷新时横幅读它（G·8.4 ①），前端 setRoom 忽略未知字段。 */
       this.send(ws, {t:OUT.WELCOME, you:{anon_id:anonId, nick:me.nick || f.nick || '玩家'},
-        room:{rule:room.rule, baredice:!!room.baredice, seq:room.seq, msg_count:await this.storage().countMsgs()},
+        room:{rule:room.rule, baredice:!!room.baredice, seq:room.seq, msg_count:await this.storage().countMsgs(),
+          reset_at:anchor.reset_at ?? null},
         server_time:Date.now(), members:mem,
         online:this.onlineCount(), total:mem.length});
       /* ★ 首屏 vs 补齐（真机反馈 · C 组）
@@ -603,6 +628,8 @@ export class RoomDO extends DurableObject {
       this.broadcast({t:OUT.BATCH, msgs:r.msgs, cursor:r.msgs.length ? r.msgs[r.msgs.length - 1].seq : 0});
       if(r.state) this.broadcast({t:OUT.STATE, room:r.state});       // ★ 前端一律以后端为准回写
       if(r.nick)  this.broadcast(this.presenceFrame());
+      /* ★ 用户动作产出新留痕（口径 4）→ 刷新 reset_at 并重新 arm；记账失败不阻断指令回包。 */
+      try{ await this.refreshAnchor(); }catch(e){ /* 记账失败不影响掷骰 */ }
       return;
     }
   }
@@ -653,36 +680,73 @@ export class RoomDO extends DurableObject {
     this.ctx.getWebSockets().forEach(ws => { if(ws !== except) try{ ws.send(s); }catch(e){} });
   }
 
-  /* ---------- alarm：30 天清理 + 到期前提醒 ---------- */
+  /* ---------- alarm：生命周期唯一入口（决策与 SQL 全在 lifecycle.js） ----------
+   * ★ S2 还原路径独立步骤：旧 alarm 的「提前 7 天落一条 kind:'sys' 消息」（坑 2）
+   *   与「无条件 setAlarm + 每日空转」已全部移除。现在这里只做 IO 适配，
+   *   生产与 tests/test_schema.mjs 真跑的是同一个 runLifecycle()。
+   *   半开连接巡检、30 天滚动清理、提前 7 天提醒、归零还原仍在同一 次 alarm（G·8.5）。 */
   async alarm(){
+    return runLifecycle(this.lifecycleDB(), this.lifecycleIO(), Date.now());
+  }
+
+  /** workerd 的 sql.exec → runLifecycle 要的 {q, run}（q 返回行对象数组，与 storage() 的 one/q 同口径） */
+  lifecycleDB(){
+    const sql = this.sql;
+    return {
+      q:   (s, ...p) => sql.exec(s, ...p).toArray(),
+      run: (s, ...p) => { sql.exec(s, ...p); },
+    };
+  }
+  /** IO 适配：广播 / 还原 / 巡检 / 在线数 / 单实例续排（唯一替身只出现在真跑测试里） */
+  lifecycleIO(){
+    return {
+      broadcast:  f  => this.broadcast(f),
+      reset:      () => this.resetRoom(),
+      sweepIdle:  () => this.sweepIdle(),
+      onlineCount:() => this.onlineCount(),
+      rearm:      at => this.rearm(at),
+    };
+  }
+
+  /* ★ 归零还原路径（静默）：RESET_SQL 成对清两表 + 清 pcs / members + B2 写回默认 +
+     锚点置空；墓碑（room 行 / code / created_at / seq / PIN）一列不动（B1 / 口径 1）。
+     零消息 / 零 allocSeq() / 零续期 / 零落库广播；只发不落库的瞬时帧（G·8.4 ② / C3）。
+     ★ 不排下一轮闹钟、不写 last_active（L3 / 口径 8）。函数名含 reset —— C2 / C3 / ⑧ 守卫盯这段。 */
+  async resetRoom(){
+    RESET_SQL.forEach(s => this.sql.exec(s));      // ★ 顺序先 combat_entry 后 combat（C2）
+    resetFrames({code:this.code, online:this.onlineCount()}).forEach(f => this.broadcast(f));
+    return true;
+  }
+
+  /** 单实例续排：getAlarm() 判重、只在需要提前时覆盖（L6）。at=null = 不排（空容器），
+   *  「停 alarm」≠ 销毁容器 —— 绝不调 deleteAll()（坑 4 / 口径 1）。 */
+  async rearm(at){
+    if(at == null) return;
+    const cur = await this.ctx.storage.getAlarm();
+    if(cur != null && cur <= at) return;          // 已排且更早 → 保持单实例，不覆盖
+    await this.ctx.storage.setAlarm(at);
+  }
+
+  /** 明确的用户请求路径（join / ws 握手 / 发指令 / 导出 / 导入）才重新 arm；
+   *  取 min(巡检 / 下一条到期 / reset_at−7d / reset_at)，空容器返回 null 不排（G·8.5）。
+   *  ★ 只 arm，不刷新 reset_at —— 纯访问不续活（口径 9）。 */
+  async armFromUserAction(){
     const now = Date.now();
-    const room = this.sql.exec('SELECT * FROM room WHERE id = 1').toArray()[0];
-    if(!room) return;
-    const cut = now - KEEP_DAYS * DAY;
-    // ① 到期前 7 天广播提醒（★ 静默删历史 = 用户某天打开发现记录没了，必须提前说）
-    if(!room.notified_clean && now - room.created_at > WARN_DAYS * DAY){
-      const base = await this.storage().allocSeq(1);
-      const msg = {seq:base, id:this.code + ':' + base, ts:now, kind:'sys', from:'骰娘', actor:'骰娘',
-        anon_id:null, req_id:null, rule_at:room.rule,
-        payload:{title:'🧹 房间消息将在 7 天后清理', line1:'本房间消息只保留 30 天',
-          line2:'重要战报请先导出（.help 看导出方式，或在顶栏导出按钮）'}};
-      await this.storage().insertMsgs([msg]);
-      this.sql.exec('UPDATE room SET notified_clean = 1 WHERE id = 1');
-      this.broadcast({t:OUT.BATCH, msgs:[msg], cursor:base});
-    }
-    /* ② 日常清理：只 DELETE —— 2026-11-03 workerd 实测更正：
-     *   DO 的 sql.exec('VACUUM') 被隐式事务禁止、PRAGMA auto_vacuum 系列全部 SQLITE_AUTH，
-     *   且 DELETE 后 databaseSize 立即回落（6.16 MB → 8 KB，两轮复现）→ 不需要额外压缩，
-     *   500 MB 全局清理组件据此取消，改用 Cloudflare 原生账户级告警。
-     * ★★ 双条件：满 30 天 **且** 没被续期。
-     *   只判 ts 会把"刚续过期的老消息"删掉 —— 那正是用户主动保下来的内容，
-     *   静默删掉等于这个功能没实现。 */
-    this.sql.exec('DELETE FROM messages WHERE ts < ? AND (keep_until IS NULL OR keep_until <= ?)', cut, now);
-    this.sql.exec('DELETE FROM idempotency WHERE ts < ?', cut);   // 与消息同窗口，避免 dup 指向已删消息
-    this.sql.exec('UPDATE room SET last_active = ? WHERE id = 1', now);
-    // ③ 顺带巡检在线连接；有人在就一分钟后继续巡，没人就退回每日清理
-    this.sweepIdle();
-    this.ctx.storage.setAlarm(this.onlineCount() > 0 ? now + SWEEP_MS : now + DAY);
+    const q = (s, ...p) => this.sql.exec(s, ...p).toArray();
+    const room = q('SELECT reset_at FROM room WHERE id = 1')[0] || {};
+    const hasContent = Number(q(SQL_COUNT_CONTENT)[0].c) > 0;
+    const nextExpiry = q(SQL_MIN_EXPIRY)[0].e;
+    const at = nextAlarmAt({now, online:this.onlineCount(), nextExpiry,
+      resetAt:room.reset_at, hasContent});
+    await this.rearm(at);
+  }
+
+  /** ★ reset_at 只由用户动作刷新（发指令 / 导出 / 导入）：取计时主体最大到期时刻。
+   *  alarm 绝不写它（G·8.3 / 坑 5）；last_active 也绝不当锚点。 */
+  async refreshAnchor(){
+    const r = this.sql.exec(SQL_MAX_EXPIRY).toArray()[0];
+    this.sql.exec('UPDATE room SET reset_at = ? WHERE id = 1', (r && r.e != null) ? r.e : null);
+    await this.armFromUserAction();
   }
 
   get code(){ return this.ctx.id.name || ''; }
