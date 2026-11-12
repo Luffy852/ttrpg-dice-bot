@@ -19,7 +19,10 @@ PRAGMA journal_mode = WAL;
 -- ★ 旧库迁移（room.js 构造时执行，幂等）：
 --   ALTER TABLE members ADD COLUMN cid TEXT;   -- 已存在的表不会被 CREATE TABLE IF NOT EXISTS 改到
 --   ALTER TABLE room ADD COLUMN notified_clean INTEGER NOT NULL DEFAULT 0;  -- 旧房间缺列会让 alarm 的 UPDATE 整段中断
+--   ALTER TABLE room ADD COLUMN reset_at INTEGER;                 -- S2 还原路径独立步骤：锚点列，旧房间补成 NULL（= 空房间）
+--   ALTER TABLE room ADD COLUMN warned_for_reset_at INTEGER;      -- 同上：提醒去重标记，旧房间补成 NULL
 --   （idx_members_cid 见下方索引区；T6 起它是正式语句，不再是注释里的示意）
+-- ★ 三段式顺序不变：TABLES（CREATE TABLE IF NOT EXISTS 纯新增）→ ALTER 幂等补列 → INDEXES 单独建（009950）。
 
 -- 房间元信息（单行：一个 DO = 一个房间，不需要多表 JOIN）
 CREATE TABLE IF NOT EXISTS room (
@@ -34,7 +37,9 @@ CREATE TABLE IF NOT EXISTS room (
   pin_hmac     TEXT,                       -- NULL = 开放式房间；★ 只存摘要，不存明文
   pin_salt     TEXT,
   seq          INTEGER NOT NULL DEFAULT 0, -- 已分配到的最大 seq（冷启动时用 MAX(messages.seq) 校准）
-  notified_clean INTEGER NOT NULL DEFAULT 0, -- ★ 提前 7 天清理提醒是否已发；旧库由 room.js 幂等 ALTER 补列
+  notified_clean INTEGER NOT NULL DEFAULT 0, -- 旧提醒标记：归零时回 0；新判定改用 warned_for_reset_at（G·8.5 坑 3）
+  reset_at     INTEGER,                    -- ★ 锚点：max(计时主体每条的到期时刻)，只由用户动作刷新，alarm 绝不写
+  warned_for_reset_at INTEGER,             -- ★ 本轮提醒对应的 reset_at；值变了才允许再提醒（每轮可再触发）
   ver          INTEGER NOT NULL DEFAULT 1  -- schema 版本，便于迁移
 );
 

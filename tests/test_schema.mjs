@@ -15,6 +15,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {createRequire} from 'node:module';
+/* ★ S2 第二步：生命周期决策与 SQL 的单一源。下面第 4 / 5 节真跑的就是生产那一份
+   （runLifecycle 是 room.js alarm() 的唯一决策入口），不在测试里另抄一份顺序。 */
+import {runLifecycle, RESET_SQL, SQL_SWEEP_MSGS, SQL_SWEEP_IDEM, SQL_COUNT_CONTENT,
+  SQL_MAX_EXPIRY, SQL_MIN_EXPIRY, shouldWarn, shouldReset, nextAlarmAt,
+  expiryOf, idemExpiryOf, KEEP_MS, WARN_MS, SWEEP_MS, resetFrames, warnFrame} from '../apps/worker/src/lifecycle.js';
 const initSqlJs = createRequire(import.meta.url)('sql.js');   // sql.js 只有 CJS 入口
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -147,8 +152,8 @@ console.log('== 3. 索引与约束真的生效（不是建了就完事） ==');
 /* ==========================================================================
  * 4. C4 / C5 真跑：逐条清理与导入重排都不碰先攻表（附录 I·3.8.2）
  * ★ 用 room.js 里的真实 DELETE 语句与 core.js 的生产 planImport，不抄测试替身（#18）。
- * ★ 边界：当前无还原 / 重置路径，「归零时两表一并清空」由模块 B 独立步骤实现，
- *   本组不假装验过它；这里验的是「战斗进行中，清理 / 导入不掉表」。
+ * ★ 本组只验「战斗进行中，清理 / 导入不掉表」；「归零时两表一并清空」由第 5 节
+ *   runLifecycle 真跑覆盖（模块 B 第二步已实现还原路径）。
  * ========================================================================== */
 console.log('== 4. C4 / C5 真跑：逐条清理与导入重排都不碰先攻表 ==');
 {
@@ -171,15 +176,11 @@ console.log('== 4. C4 / C5 真跑：逐条清理与导入重排都不碰先攻�
   db3.run(`INSERT INTO idempotency (req_id, seq, ts) VALUES ('r1', 1, ?)`, [now - 31 * DAY]);
   db3.run(`INSERT INTO idempotency (req_id, seq, ts) VALUES ('r2', 2, ?)`, [now]);
 
-  /* ★ C4：从 room.js 源码里取真实清理语句（测试与生产同源，避免抄一份漂移） */
-  const roomSrc = fs.readFileSync(path.join(ROOT, 'apps', 'worker', 'src', 'room.js'), 'utf8');
-  const delMsgs = (roomSrc.match(/'(DELETE FROM messages WHERE ts < \?[^']*)'/) || [])[1];
-  const delIdem = (roomSrc.match(/'(DELETE FROM idempotency WHERE ts < \?)'/) || [])[1];
-  ok('★ C4 取到 room.js 的真实清理语句（不是测试替身）', !!delMsgs && !!delIdem);
-  if(delMsgs && delIdem){
-    db3.run(delMsgs, [now - 30 * DAY, now]);
-    db3.run(delIdem, [now - 30 * DAY]);
-  }
+  /* ★ C4：滚动 DELETE 的单一源是 lifecycle.js 的两个生产常量（第二步起不再从 room.js 正则抠）。 */
+  ok('★ C4 取到生命周期单一源的滚动清理语句（不是测试替身）',
+    /^DELETE FROM messages\b/.test(SQL_SWEEP_MSGS) && /^DELETE FROM idempotency\b/.test(SQL_SWEEP_IDEM));
+  db3.run(SQL_SWEEP_MSGS, [now - 30 * DAY, now]);
+  db3.run(SQL_SWEEP_IDEM, [now - 30 * DAY]);
   eq('★ C4 战斗中滚动 DELETE 后先攻条目数不变', count3('combat_entry'), 2);
   eq('★ C4 战斗中滚动 DELETE 后战斗行不变', count3('combat'), 1);
   eq('★ C4 过期消息确实被删（断言不是摆设）', count3('messages'), 1);
@@ -203,6 +204,189 @@ console.log('== 4. C4 / C5 真跑：逐条清理与导入重排都不碰先攻�
   eq('★ C5 导入落库后先攻条目数不变', count3('combat_entry'), 2);
   eq('★ C5 导入落库后战斗行不变', count3('combat'), 1);
   eq('★ C5 导入确实新增一条消息（断言不是摆设）', count3('messages'), 2);
+}
+
+/* ==========================================================================
+ * 5. 还原路径真跑（模块 B 第二步）
+ * ★ 跑的是 room.js alarm() 的**同一个 runLifecycle()** 与同一组 RESET_SQL / SWEEP 常量，
+ *   唯一替身是 IO（广播 / 巡检 / 排闹钟），不在测试里抄一遍决策顺序（坑 #18）。
+ * ★ 覆盖：009950 旧库迁移、C1（有先攻表但消息全过期 → 正常归零）、C4（战斗中不掉表）、
+ *   C2 / C3（成对清两表 / 静默）、B1–B3 墓碑与还原规格、提醒不落库、锚点只由用户动作刷新。
+ * ========================================================================== */
+console.log('== 5. 还原路径真跑（runLifecycle 单一源 · 旧库迁移 / C1–C4 / B1–B3）==');
+{
+  const DAY = 86400000, now = 1772000000000;
+  const splitDdl = s => s.split(';').map(x => x.trim()).filter(x => x && !/^PRAGMA/i.test(x));
+  /* sql.js → runLifecycle 的 {q, run}：q 返回行对象数组（与 workerd 的 toArray() 同形状） */
+  const driver = db => ({
+    q: (s, ...p) => {
+      const r = db.exec(s, p.length ? p : undefined);
+      if(!r.length) return [];
+      return r[0].values.map(row => Object.fromEntries(r[0].columns.map((c, i) => [c, row[i]])));
+    },
+    run: (s, ...p) => { db.run(s, p.length ? p : undefined); },
+  });
+  const one = (db, s) => {
+    const r = db.exec(s);
+    return r.length ? Object.fromEntries(r[0].columns.map((c, i) => [c, r[0].values[0][i]])) : {};
+  };
+  const cnt = (db, t) => db.exec('SELECT COUNT(*) AS c FROM ' + t)[0].values[0][0];
+  /* IO 替身：reset() 执行**生产的 RESET_SQL** 并发生**产的 resetFrames**，不另写一份 */
+  const ioStub = (db, frames) => ({
+    broadcast: f => frames.push(f),
+    reset: () => {
+      RESET_SQL.forEach(s => db.run(s));
+      resetFrames({code:'123456', online:0}).forEach(f => frames.push(f));
+      return true;
+    },
+    sweepIdle: () => {},
+    onlineCount: () => 0,
+    rearm: at => { frames.push({__arm:at}); },
+  });
+
+  /* ---------- 5.1 旧库（只有 5 张表、room 无两条锚点列）→ 新代码唤醒 ---------- */
+  {
+    const old = new SQL.Database();
+    const oldDdl = ddl
+      .replace(/\s*reset_at\s+INTEGER,[^\n]*/, '')
+      .replace(/\s*warned_for_reset_at\s+INTEGER,[^\n]*/, '')
+      .replace(/-- S2 模块 B[\s\S]*?(?=-- 说明：无 visibility)/, '');
+    splitDdl(oldDdl).forEach(s => old.run(s));
+    old.run(`INSERT INTO room (id, code, created_at, last_active, rule, baredice, rule_set_by, rule_set_at,
+      pin_hmac, pin_salt, seq, notified_clean, ver) VALUES (1,'123456',?,?,'coc7',1,'老王',?,'HMAC','SALT',7,1,1)`,
+      [now - 40 * DAY, now, now - 10 * DAY]);
+    old.run(`INSERT INTO members (anon_id, cid, nick, joined_at, last_seen, msg_count)
+      VALUES ('a1','cid-a-abcdef','老王',1,1,3)`);
+    old.run(`INSERT INTO messages (seq,id,ts,kind,from_name,payload)
+      VALUES (7,'123456:7',?,'chat','老王','{"text":"老消息"}')`, [now]);
+    old.run(`INSERT INTO idempotency (req_id, seq, ts) VALUES ('old-req',7,?)`, [now]);
+    old.run(`INSERT INTO pcs (anon_id, family, version, data, updated_at) VALUES ('a1','coc7',1,'{}',?)`, [now]);
+    /* 现行构造函数三段式：TABLES → ALTER 补列 → INDEXES */
+    const stmts = splitDdl(ddl);
+    stmts.filter(s => /CREATE TABLE IF NOT EXISTS/i.test(s)).forEach(s => old.run(s));
+    try{ old.run('ALTER TABLE room ADD COLUMN reset_at INTEGER'); }catch(e){ /* 列已存在 */ }
+    try{ old.run('ALTER TABLE room ADD COLUMN warned_for_reset_at INTEGER'); }catch(e){ /* 列已存在 */ }
+    stmts.filter(s => /CREATE INDEX IF NOT EXISTS/i.test(s)).forEach(s => { try{ old.run(s); }catch(e){} });
+
+    const cols = old.exec('PRAGMA table_info(room)')[0].values.map(r => r[1]);
+    ok('★ 5.1 旧库唤醒后长出两张空表 + 两条锚点列（009950 三段式）',
+      cnt(old, 'combat') === 0 && cnt(old, 'combat_entry') === 0 &&
+      cols.includes('reset_at') && cols.includes('warned_for_reset_at'));
+    const r0 = one(old, 'SELECT * FROM room WHERE id = 1');
+    ok('★ 5.1 老数据完好（昵称 / 老消息 / PIN / seq / created_at 墓碑）',
+      one(old, "SELECT nick FROM members WHERE anon_id = 'a1'").nick === '老王' &&
+      /老消息/.test(String(one(old, 'SELECT payload FROM messages WHERE seq = 7').payload)) &&
+      r0.pin_hmac === 'HMAC' && r0.seq === 7 && r0.created_at === now - 40 * DAY);
+    ok('★ 5.1 旧库锚点列补成 NULL（空房间，不凭空续命）',
+      r0.reset_at == null && r0.warned_for_reset_at == null);
+    const f1 = [];
+    const r1 = await runLifecycle(driver(old), ioStub(old, f1), now);
+    ok('★ 5.1 旧 schema 房间跑一次 alarm 不中断（输入项 A T1 验收项）',
+      r1 && r1.reset === false && r1.armAt != null);
+  }
+
+  /* ---------- 5.2 提醒 / C4 战斗中不掉表 / 归零还原（C1–C3 / B1–B3） ---------- */
+  {
+    const d = new SQL.Database();
+    splitDdl(ddl).forEach(s => d.run(s));
+    d.run(`INSERT INTO room (id, code, created_at, last_active, rule, baredice, rule_set_by, rule_set_at,
+      pin_hmac, pin_salt, seq, notified_clean, reset_at, warned_for_reset_at, ver)
+      VALUES (1,'123456',?,?,'coc7',1,'老王',?,'HMAC','SALT',42,1,?,NULL,1)`,
+      [now - 40 * DAY, now, now - 10 * DAY, now + 3 * DAY]);
+    d.run(`INSERT INTO members (anon_id, cid, nick, joined_at, last_seen, msg_count)
+      VALUES ('a1','cid-a-abcdef','老王',1,1,3),('a2','cid-b-abcdef','小李',1,1,0)`);
+    d.run(`INSERT INTO pcs (anon_id, family, version, data, updated_at) VALUES ('a1','coc7',1,'{}',?)`, [now]);
+    d.run(`INSERT INTO combat (id, room_code, round, cursor_entry_id, started_at, started_by)
+      VALUES (1,'123456',1,2,?,'老王')`, [now]);
+    d.run(`INSERT INTO combat_entry (id, combat_id, name, value, dex_mod, created_at, created_by)
+      VALUES (1,1,'老王',17,3,?,'老王'),(2,1,'哥布林1',14,0,?,'老王')`, [now, now]);
+    d.run(`INSERT INTO messages (seq,id,ts,kind,from_name,payload) VALUES
+      (40,'123456:40',?,'chat','老王','{"text":"过期"}'),
+      (41,'123456:41',?,'cmd','老王','{"text":".ri"}')`, [now - 31 * DAY, now]);
+    d.run(`INSERT INTO idempotency (req_id, seq, ts) VALUES ('r-old',40,?),('r-new',41,?)`,
+      [now - 31 * DAY, now]);
+
+    /* 第一次 alarm：提前 7 天提醒（瞬时帧）+ 滚动 DELETE（C4：战斗进行中不掉表） */
+    const f2 = [];
+    const r2 = await runLifecycle(driver(d), ioStub(d, f2), now);
+    ok('★ 5.2 提醒按 reset_at − 7d 触发、每轮只发一次（坑 3）',
+      r2.warned === true && r2.reset === false &&
+      f2.filter(f => f && f.t === 'state' && f.room && f.room.warn === true).length === 1);
+    ok('★ 5.2 提醒是瞬时帧：不落消息、不占 seq、无 BATCH 带 msgs（口径 6 / 坑 2）',
+      !f2.some(f => f && (f.t === 'batch' || f.msgs)) &&
+      cnt(d, 'messages') === 1 && one(d, 'SELECT seq FROM room WHERE id = 1').seq === 42);
+    eq('★ 5.2 C4 战斗中滚动 DELETE 后先攻条目数不变', cnt(d, 'combat_entry'), 2);
+    eq('★ 5.2 C4 战斗中滚动 DELETE 后战斗行不变', cnt(d, 'combat'), 1);
+    eq('★ 5.2 过期消息确实被删（断言不是摆设）', cnt(d, 'messages'), 1);
+    eq('★ 5.2 过期幂等键确实被删', cnt(d, 'idempotency'), 1);
+    const rw = one(d, 'SELECT reset_at, warned_for_reset_at FROM room WHERE id = 1');
+    ok('★ 5.2 alarm 绝不写 reset_at（只由用户动作刷新，G·8.3 / 坑 5）',
+      rw.reset_at === now + 3 * DAY && rw.warned_for_reset_at === now + 3 * DAY);
+
+    /* 第二次 alarm：把剩余两条也改成过期 → 「由非空变空」→ 同一次 alarm 静默归零 */
+    d.run('UPDATE messages SET ts = ?, keep_until = NULL', [now - 31 * DAY]);
+    d.run('UPDATE idempotency SET ts = ?', [now - 31 * DAY]);
+    const f3 = [];
+    const r3 = await runLifecycle(driver(d), ioStub(d, f3), now);
+    ok('★ 5.2 C1 有先攻表但计时主体全过期 → 正常归零（辅助表行数不进判据）',
+      r3.reset === true && r3.armAt === null);
+    eq('★ 5.2 C2 归零后 combat_entry 为 0', cnt(d, 'combat_entry'), 0);
+    eq('★ 5.2 C2 归零后 combat 为 0', cnt(d, 'combat'), 0);
+    eq('★ 5.2 计时主体清空（messages / idempotency 均为 0）', cnt(d, 'messages') + cnt(d, 'idempotency'), 0);
+    eq('★ 5.2 B3 清 members / pcs（累计人次归零，不加 total_joins 列）', cnt(d, 'members') + cnt(d, 'pcs'), 0);
+    const rr = one(d, 'SELECT * FROM room WHERE id = 1');
+    ok('★ 5.2 B2 写回默认 + 锚点置空（零消息、零续活）',
+      rr.rule === 'generic' && rr.baredice === 0 && rr.rule_set_by == null &&
+      rr.rule_set_at == null && rr.notified_clean === 0 &&
+      rr.reset_at == null && rr.warned_for_reset_at == null);
+    ok('★ 5.2 B1 墓碑不动（room 行 / code / created_at / seq / PIN）',
+      rr.code === '123456' && rr.created_at === now - 40 * DAY && rr.seq === 42 &&
+      rr.pin_hmac === 'HMAC' && rr.pin_salt === 'SALT');
+    ok('★ 5.2 C3 重置静默：只有 3 个瞬时帧，零消息 / 零 seq / 零落库广播 / 不排闹钟',
+      f3.length === 3 && f3.every(f => ['reload','state','presence'].includes(f.t)) &&
+      !f3.some(f => f && (f.t === 'batch' || f.msgs || f.__arm)) &&
+      one(d, 'SELECT seq FROM room WHERE id = 1').seq === 42);
+    ok('★ 5.2 同轮不重复提醒（warned_for_reset_at 已对应本轮 reset_at）', r3.warned === false);
+  }
+
+  /* ---------- 5.3 纯决策与锚点 SQL（每条都能单独先红后绿） ---------- */
+  {
+    eq('★ 5.3 expiryOf：无续期 = ts + 30d', expiryOf(now, null), now + KEEP_MS);
+    eq('★ 5.3 expiryOf：有续期 = keep_until', expiryOf(now, now + 5 * DAY), now + 5 * DAY);
+    eq('★ 5.3 idemExpiryOf：幂等键恒为 ts + 30d', idemExpiryOf(now), now + KEEP_MS);
+    ok('★ 5.3 shouldWarn：窗口内触发 / 已警告不重发 / 锚点后推可再触发',
+      shouldWarn({now, resetAt:now + 3 * DAY, warnedForResetAt:null}) &&
+      !shouldWarn({now, resetAt:now + 3 * DAY, warnedForResetAt:now + 3 * DAY}) &&
+      shouldWarn({now, resetAt:now + 3 * DAY, warnedForResetAt:now + DAY}));
+    ok('★ 5.3 shouldWarn：锚点为空 / 已过 / 未进 7 天窗口都不提醒',
+      !shouldWarn({now, resetAt:null, warnedForResetAt:null}) &&
+      !shouldWarn({now, resetAt:now - DAY, warnedForResetAt:null}) &&
+      !shouldWarn({now, resetAt:now + 10 * DAY, warnedForResetAt:null}));
+    ok('★ 5.3 shouldReset：只认「由非空变空」，空房间不重复还原',
+      shouldReset({hadContent:true, remaining:0}) &&
+      !shouldReset({hadContent:true, remaining:1}) &&
+      !shouldReset({hadContent:false, remaining:0}));
+    ok('★ 5.3 nextAlarmAt：空容器不排 / 有人巡 1 分钟 / 取最早候选',
+      nextAlarmAt({now, online:0, nextExpiry:null, resetAt:null, hasContent:false}) === null &&
+      nextAlarmAt({now, online:1, nextExpiry:null, resetAt:null, hasContent:false}) === now + SWEEP_MS &&
+      nextAlarmAt({now, online:1, nextExpiry:now + 2 * DAY, resetAt:now + 3 * DAY, hasContent:true}) === now + SWEEP_MS);
+    eq('★ 5.3 nextAlarmAt：无在线但有内容 → 排到下一条到期',
+      nextAlarmAt({now, online:0, nextExpiry:now + DAY, resetAt:null, hasContent:true}), now + DAY);
+    /* reset_at / 下一条到期 SQL 真跑：idempotency 也是计时主体 */
+    const d2 = new SQL.Database();
+    splitDdl(ddl).forEach(s => d2.run(s));
+    d2.run(`INSERT INTO messages (seq,id,ts,kind,from_name,keep_until,payload) VALUES
+      (1,'123456:1',?,'chat','老王',?,'{}'),(2,'123456:2',?,'cmd','老王',NULL,'{}')`,
+      [now, now + 10 * DAY, now - 20 * DAY]);
+    d2.run(`INSERT INTO idempotency (req_id, seq, ts) VALUES ('r',1,?)`, [now + 5 * DAY]);
+    d2.run(`INSERT INTO combat (id, room_code, round, started_at) VALUES (1,'123456',1,?)`, [now]);
+    d2.run(`INSERT INTO combat_entry (id, combat_id, name, value, created_at) VALUES (1,1,'老王',17,?)`, [now]);
+    eq('★ 5.3 SQL_MAX_EXPIRY 取计时主体最大到期（含 idempotency 的 ts+30d）',
+      driver(d2).q(SQL_MAX_EXPIRY)[0].e, now + 35 * DAY);
+    eq('★ 5.3 SQL_MIN_EXPIRY 取下一条到期', driver(d2).q(SQL_MIN_EXPIRY)[0].e, now + 10 * DAY);
+    eq('★ 5.3 C1 SQL_COUNT_CONTENT 不读辅助表（塞了先攻两表结果仍是 3）',
+      driver(d2).q(SQL_COUNT_CONTENT)[0].c, 3);
+  }
 }
 
 console.log('---------------------------');

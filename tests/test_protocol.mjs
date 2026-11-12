@@ -346,8 +346,16 @@ console.log('== 14. ★ 半开连接要被巡检清掉（真机反馈 · B 组�
    *   那一刻 onlineCount() 还是旧值 —— 广播出去等于没回落（真机"永远多一个"的变体）。 */
   ok('★ 存活数用"总数 − 本次关闭数"，不用 onlineCount()', !/online:this\.onlineCount\(\), total:mem\.length\}\);\s*\n?\s*\}/.test(codeOnly) && /all\.length - stale\.length/.test(codeOnly));
   // ★ 排程：不排闹钟 = 巡检永远不跑（这是最容易漏的一环）
-  ok('★ 建连时排上巡检闹钟', /setAlarm\(Date\.now\(\) \+ SWEEP_MS\)/.test(codeOnly));
-  ok('★ 有人就继续巡、没人退回每日清理', /setAlarm\(this\.onlineCount\(\) > 0 \? now \+ SWEEP_MS : now \+ DAY\)/.test(codeOnly));
+  /* ★ S2 还原路径独立步骤：旧「握手无条件 setAlarm + alarm 末尾每日续排」已换成单实例形态
+   *   （L6 / G·8.5）。两条断言不删、只换守的东西：仍验「巡检闹钟会排」，再验「不会多排」。 */
+  const lifeSrc = fs.readFileSync(path.join(ROOT, 'apps', 'worker', 'src', 'lifecycle.js'), 'utf8');
+  ok('★ 握手走明确用户路径的重新 arm，且闹钟候选仍含巡检间隔',
+    /await this\.armFromUserAction\(\)/.test(codeOnly) && /nextAlarmAt\(/.test(codeOnly) &&
+    /Number\(now\) \+ SWEEP_MS/.test(lifeSrc));
+  ok('★ 单实例续排：getAlarm() 判重、只在需要提前时覆盖；空容器不排新闹钟',
+    /getAlarm\(\)/.test(codeOnly) && /cur <= at/.test(codeOnly) &&
+    /if\(at == null\) return/.test(codeOnly) && /setAlarm\(at\)/.test(codeOnly) &&
+    !/now \+ DAY\)/.test(codeOnly));
   ok('★ 在线数仍按 readyState 过滤（两条机制叠加，不互相替代）', /readyState\s*===\s*1/.test(codeOnly));
   // 口径：用户定 3 分钟，且心跳 20s 必须远小于它（否则会误伤挂机的人）
   const idle = Number((/const IDLE_MS\s*=\s*([^;]+)/.exec(codeOnly) || [])[1] ? eval((/const IDLE_MS\s*=\s*([^;]+)/.exec(codeOnly) || [])[1]) : 0);
@@ -723,8 +731,12 @@ console.log('== 25. ★★ 续期：导出/导入各续 30 天，接力链不断
 
   /* ③ 清理必须双条件：满 30 天 **且** 没被续期 */
   const roomSrc = fs.readFileSync(path.join(ROOT, 'apps', 'worker', 'src', 'room.js'), 'utf8');
+  /* ★ S2 第二步：滚动 DELETE 迁到 lifecycle.js 的 SQL_SWEEP_MSGS（alarm 决策单一源）。
+     断言不删，改验「常量文本正确」＋「room.js 走的是这份常量」，防止测试与生产分叉。 */
+  const lifeSrc = fs.readFileSync(path.join(ROOT, 'apps', 'worker', 'src', 'lifecycle.js'), 'utf8');
   ok('★ 清理带 keep_until 条件（不会删掉刚续期的老消息）',
-    /DELETE FROM messages WHERE ts < \? AND \(keep_until IS NULL OR keep_until <= \?\)/.test(roomSrc));
+    /DELETE FROM messages WHERE ts < \? AND \(keep_until IS NULL OR keep_until <= \?\)/.test(lifeSrc) &&
+    /export const SQL_SWEEP_MSGS/.test(lifeSrc) && /runLifecycle\(/.test(roomSrc));
   /* ④ 续期不能改 ts：ts 是排序键，改了会让老消息假装是刚发生的 */
   ok('★ 续期单独存 keep_until，不改 ts',
     /keep_until INTEGER/.test(fs.readFileSync(path.join(ROOT, 'apps', 'worker', 'src', 'schema.sql'), 'utf8')));
