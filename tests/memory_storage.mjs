@@ -13,6 +13,16 @@ export function createMemoryStorage(code){
   const nicks = new Map();
   const idem = new Map();
   const bySeq = new Map();
+  /* S2 模块 B · 先攻双表（与 room.js / sqlite_storage.mjs 同构，check-worker.mjs 扫对齐） */
+  let combat = null;                 // 单行/房；null = S0 空表
+  const combatEntries = [];          // 条目数组，id 自增（第三排序键）
+  let entrySeq = 0;
+  const combatSnapshot = () => ({
+    combat: combat ? {...combat} : null,
+    entries: combatEntries.slice()
+      .sort((a, b) => (b.value - a.value) || (b.dex_mod - a.dex_mod) || (a.id - b.id))
+      .map(e => ({...e})),
+  });
   return {
     code,
     async getRoom(){ return {...room}; },
@@ -59,8 +69,40 @@ export function createMemoryStorage(code){
     async history(beforeSeq, limit){
       return msgs.filter(m => m.seq < beforeSeq).slice(-limit);
     },
+    /* ---------- S2 模块 B · 先攻（与 room.js 的 SQL 语义逐 op 对齐）---------- */
+    async combatSnapshot(){ return combatSnapshot(); },
+    async combatApply(ops){
+      for(const op of (ops || [])){
+        if(op.op === 'open'){
+          if(!combat) combat = {id:1, round:1, cursor_entry_id:null, started_at:op.now, started_by:op.by};
+        } else if(op.op === 'upsert'){
+          for(const r of (op.rows || [])){
+            const hit = combatEntries.find(e => e.name === r.name);
+            if(hit) hit.value = r.value;      // 覆写只改 value，其余字段保持
+            else combatEntries.push({id:++entrySeq, combat_id:combat ? combat.id : 0,
+              name:r.name, owner:r.owner, card_ref:r.card_ref, value:r.value,
+              dex_mod:r.dex_mod, created_at:r.now, created_by:r.by});
+          }
+        } else if(op.op === 'setvalue'){
+          const hit = combatEntries.find(e => e.name === op.name);
+          if(hit) hit.value = op.value;
+        } else if(op.op === 'delete'){
+          const names = new Set(op.names || []);
+          for(let i = combatEntries.length - 1; i >= 0; i--)
+            if(names.has(combatEntries[i].name)) combatEntries.splice(i, 1);
+        } else if(op.op === 'cursor'){
+          if(combat) combat.cursor_entry_id = op.id;
+        } else if(op.op === 'round'){
+          if(combat) combat.round = op.n;
+        } else if(op.op === 'clear'){
+          combatEntries.length = 0;          // ★ 先删条目再删战斗行（C2 顺序）
+          combat = null;
+        }
+      }
+      return combatSnapshot();
+    },
     // 测试辅助
-    _all: () => msgs, _room: () => room, _idem: () => idem,
+    _all: () => msgs, _room: () => room, _idem: () => idem, _combat: combatSnapshot,
     _deleteOlderThan(ts){ for(let i = msgs.length - 1; i >= 0; i--) if(msgs[i].ts < ts){ bySeq.delete(msgs[i].seq); msgs.splice(i, 1); } },
   };
 }

@@ -177,6 +177,17 @@ export class RoomDO extends DurableObject {
       seq:r.seq, id:r.id, ts:r.ts, kind:r.kind, from:r.from_name, actor:r.actor,
       anon_id:r.anon_id, req_id:r.req_id, rule_at:r.rule_at, payload:JSON.parse(r.payload),
     });
+    /* ★ S2 模块 B：先攻快照单一源（combatSnapshot 与 combatApply 的返回值共用一份实现）。
+     *   排序键：value DESC → dex_mod DESC（隐藏破平，不显示）→ id ASC（先录入者优先）。 */
+    const combatSnapshot = () => {
+      const c = one('SELECT id, round, cursor_entry_id, started_at, started_by FROM combat LIMIT 1');
+      const entries = q('SELECT id, combat_id, name, owner, card_ref, value, dex_mod, created_at, created_by ' +
+        'FROM combat_entry ORDER BY value DESC, dex_mod DESC, id ASC')
+        .map(r => ({id:r.id, combat_id:r.combat_id, name:r.name, owner:r.owner, card_ref:r.card_ref,
+          value:r.value, dex_mod:r.dex_mod, created_at:r.created_at, created_by:r.created_by}));
+      return {combat:c ? {id:c.id, round:c.round, cursor_entry_id:c.cursor_entry_id,
+        started_at:c.started_at, started_by:c.started_by} : null, entries};
+    };
     return {
       code: this.code,
       async getRoom(){
@@ -289,6 +300,50 @@ export class RoomDO extends DurableObject {
       async history(beforeSeq, limit){
         return q('SELECT * FROM messages WHERE seq < ? ORDER BY seq DESC LIMIT ?', beforeSeq, limit)
           .reverse().map(row2msg);
+      },
+      /* ---------- S2 模块 B · 先攻双表（I·3.5 / I·3.6）----------
+       * ★ 只有两个方法：快照（只读）+ 显式 ops 落库。所有解析 / 状态机 / 文案都在
+       *   initiative.js（纯逻辑单一源），这里只负责 SQL 语义，与 memory / sqlite 两份
+       *   测试替身逐方法对齐（tools/check-worker.mjs 会扫）。 */
+      async combatSnapshot(){ return combatSnapshot(); },
+      async combatApply(ops){
+        ctx.storage.transactionSync(() => {
+          for(const op of (ops || [])){
+            if(op.op === 'open'){
+              if(!one('SELECT 1 FROM combat LIMIT 1'))
+                sql.exec('INSERT INTO combat (room_code, round, cursor_entry_id, started_at, started_by) VALUES (?, 1, NULL, ?, ?)',
+                  this.code, op.now, op.by);
+            } else if(op.op === 'upsert'){
+              for(const r of (op.rows || [])){
+                const hit = one('SELECT id FROM combat_entry WHERE name = ?', r.name);
+                if(hit){
+                  /* 覆写只改 value：id / created_at / owner / card_ref / dex_mod 全部保持（先入者优先） */
+                  sql.exec('UPDATE combat_entry SET value = ? WHERE id = ?', r.value, hit.id);
+                } else {
+                  const cid = one('SELECT id FROM combat LIMIT 1');
+                  sql.exec('INSERT INTO combat_entry (combat_id, name, owner, card_ref, value, dex_mod, created_at, created_by) ' +
+                    'VALUES (?, ?, ?, ?, ?, ?, ?, ?)', cid ? cid.id : 0, r.name, r.owner, r.card_ref,
+                    r.value, r.dex_mod, r.now, r.by);
+                }
+              }
+            } else if(op.op === 'setvalue'){
+              sql.exec('UPDATE combat_entry SET value = ? WHERE name = ?', op.value, op.name);
+            } else if(op.op === 'delete'){
+              for(const n of (op.names || [])) sql.exec('DELETE FROM combat_entry WHERE name = ?', n);
+            } else if(op.op === 'cursor'){
+              sql.exec('UPDATE combat SET cursor_entry_id = ?', op.id);
+            } else if(op.op === 'round'){
+              sql.exec('UPDATE combat SET round = ?', op.n);
+            } else if(op.op === 'clear'){
+              /* ★ 顺序先 combat_entry 后 combat（C2：避免 cursor_entry_id 悬空）。
+               *   这是「用户指令清空」路径；房间归零的系统清表走 lifecycle.js 的 RESET_SQL，
+               *   那条路径零消息零广播（C3），两者不混。 */
+              sql.exec('DELETE FROM combat_entry');
+              sql.exec('DELETE FROM combat');
+            }
+          }
+        });
+        return combatSnapshot();
       },
     };
   }

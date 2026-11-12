@@ -26,6 +26,17 @@ export function createSqliteStorage(db, code){
     return {seq:r.seq, id:r.id, ts:r.ts, kind:r.kind, from:r.from_name, actor:r.actor,
       anon_id:r.anon_id, req_id:r.req_id, rule_at:r.rule_at, payload:JSON.parse(r.payload)};
   }
+  /* ★ S2 模块 B：先攻快照单一源（combatSnapshot 与 combatApply 返回值共用）。
+   *   只用 q / one 查询 —— 不依赖 run() 的返回值（该既有缺陷单列轮次 X3 修）。 */
+  const combatSnapshot = () => {
+    const c = one('SELECT id, round, cursor_entry_id, started_at, started_by FROM combat LIMIT 1');
+    const entries = q('SELECT id, combat_id, name, owner, card_ref, value, dex_mod, created_at, created_by ' +
+      'FROM combat_entry ORDER BY value DESC, dex_mod DESC, id ASC')
+      .map(r => ({id:r.id, combat_id:r.combat_id, name:r.name, owner:r.owner, card_ref:r.card_ref,
+        value:r.value, dex_mod:r.dex_mod, created_at:r.created_at, created_by:r.created_by}));
+    return {combat:c ? {id:c.id, round:c.round, cursor_entry_id:c.cursor_entry_id,
+      started_at:c.started_at, started_by:c.started_by} : null, entries};
+  };
   return {
     code,
     init({code:c, now}){
@@ -94,6 +105,38 @@ export function createSqliteStorage(db, code){
     async since(cursor, limit){ return rows2msgs(q('SELECT * FROM messages WHERE seq > ? ORDER BY seq LIMIT ?', cursor, limit)); },
     async recent(limit){ return run('SELECT * FROM messages ORDER BY seq DESC LIMIT ?', limit || 200).reverse().map(row2msg); },
     async history(beforeSeq, limit){ return rows2msgs(q('SELECT * FROM messages WHERE seq < ? ORDER BY seq DESC LIMIT ?', beforeSeq, limit)).reverse(); },
+    /* ---------- S2 模块 B · 先攻（与 room.js 的 SQL 语句逐 op 等价）---------- */
+    async combatSnapshot(){ return combatSnapshot(); },
+    async combatApply(ops){
+      for(const op of (ops || [])){
+        if(op.op === 'open'){
+          if(!one('SELECT 1 FROM combat LIMIT 1'))
+            run('INSERT INTO combat (room_code, round, cursor_entry_id, started_at, started_by) VALUES (?, 1, NULL, ?, ?)',
+              code, op.now, op.by);
+        } else if(op.op === 'upsert'){
+          for(const r of (op.rows || [])){
+            const hit = one('SELECT id FROM combat_entry WHERE name = ?', r.name);
+            if(hit) run('UPDATE combat_entry SET value = ? WHERE id = ?', r.value, hit.id);
+            else {
+              const cid = one('SELECT id FROM combat LIMIT 1');
+              run('INSERT INTO combat_entry (combat_id, name, owner, card_ref, value, dex_mod, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                cid ? cid.id : 0, r.name, r.owner, r.card_ref, r.value, r.dex_mod, r.now, r.by);
+            }
+          }
+        } else if(op.op === 'setvalue'){
+          run('UPDATE combat_entry SET value = ? WHERE name = ?', op.value, op.name);
+        } else if(op.op === 'delete'){
+          for(const n of (op.names || [])) run('DELETE FROM combat_entry WHERE name = ?', n);
+        } else if(op.op === 'cursor'){
+          run('UPDATE combat SET cursor_entry_id = ?', op.id);
+        } else if(op.op === 'round'){
+          run('UPDATE combat SET round = ?', op.n);
+        } else if(op.op === 'clear'){
+          run('DELETE FROM combat_entry'); run('DELETE FROM combat');
+        }
+      }
+      return combatSnapshot();
+    },
     // 测试辅助
     cleanOlderThan(ts){ run('DELETE FROM messages WHERE ts < ?', ts); run('DELETE FROM idempotency WHERE ts < ?', ts); },
     count(t){ return one('SELECT COUNT(*) AS c FROM ' + t).c; },

@@ -26,7 +26,13 @@ const ok = (n, c, extra) => { if(c) pass++; else { fail++; console.log('  ❌ ' 
 
 /* core.js 实际调用的 storage 方法（从源码里扫，不手写清单 —— 手写清单自己也会漂） */
 const coreSrc = read('apps/worker/src/core.js');
-const used = new Set([...coreSrc.matchAll(/\b(?:await\s+)?storage\.(\w+)\s*\(/g)].map(m => m[1]));
+/* ★ S2 模块 B：先攻的 storage 调用在独立模块 initiative.js 里，必须一起进对齐闸门 ——
+ * 只扫 core.js 的话新增的 combatSnapshot / combatApply 漏一份实现也全绿（线上才炸）。 */
+const initSrc = read('apps/worker/src/initiative.js');
+const used = new Set([
+  ...coreSrc.matchAll(/\b(?:await\s+)?storage\.(\w+)\s*\(/g),
+  ...initSrc.matchAll(/\b(?:await\s+)?storage\.(\w+)\s*\(/g),
+].map(m => m[1]));
 // recentRolls 等通过 buildCtx 调用，同样算
 console.log('== ① 三份 storage 实现逐方法对齐 ==');
 console.log('（core.js 用到 ' + used.size + ' 个方法：' + [...used].sort().join(' ') + '）');
@@ -48,6 +54,31 @@ console.log('（core.js 用到 ' + used.size + ' 个方法：' + [...used].sort(
   const onlyB = [...b].filter(x => used.has(x) && !a.has(x));
   ok('★ 两份测试实现的公共方法集合一致', onlyA.length === 0 && onlyB.length === 0,
     'sqlite 独有=' + onlyA.join(',') + ' / memory 独有=' + onlyB.join(','));
+}
+
+/* ★ S2 模块 B：先攻状态层的守恒（I·3.6 排序键 / 4A 接缝 / C2 清空顺序） */
+console.log('== ①b 先攻状态层守恒 ==');
+{
+  const room = read('apps/worker/src/room.js');
+  const sq = read('tests/sqlite_storage.mjs');
+  const mem = read('tests/memory_storage.mjs');
+  const ini = read('apps/worker/src/initiative.js');
+  const ORDER = /ORDER BY value DESC, dex_mod DESC, id ASC/;
+  ok('★ 先攻排序键 · SQL 两路一致', ORDER.test(room) && ORDER.test(sq),
+    'room=' + ORDER.test(room) + ' sqlite=' + ORDER.test(sq));
+  ok('★ 先攻排序键 · 内存路等价',
+    /b\.value\s*-\s*a\.value/.test(mem) && /b\.dex_mod\s*-\s*a\.dex_mod/.test(mem) && /a\.id\s*-\s*b\.id/.test(mem));
+  ok('★ 先攻逻辑层不直接写 SQL（持久化只在三份 storage）',
+    !/INSERT INTO|DELETE FROM|UPDATE combat/.test(ini));
+  const clearBody = (room.match(/op\.op === 'clear'[\s\S]{0,400}/) || [''])[0];
+  /* ★ 带引号精确匹配：'DELETE FROM combat' 是 'DELETE FROM combat_entry' 的前缀，
+   *   不带引号会把两条都命中同一位置，顺序断言永远红（假阳性）。 */
+  const iEntry = clearBody.indexOf("'DELETE FROM combat_entry'");
+  const iCombat = clearBody.indexOf("'DELETE FROM combat'");
+  ok('★ 用户清空路径顺序先 combat_entry 后 combat（C2）',
+    iEntry >= 0 && iCombat >= 0 && iEntry < iCombat, 'entry=' + iEntry + ' combat=' + iCombat);
+  ok('★ 系统归零清表不经过先攻指令层（C3）',
+    !/RESET_SQL|resetRoom/.test(ini));
 }
 
 console.log('== ② schema.sql 是唯一出处：room.js 的 SCHEMA 不能与它不一致 ==');
