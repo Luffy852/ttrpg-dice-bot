@@ -63,6 +63,28 @@ export const TABLES = [
   `CREATE TABLE IF NOT EXISTS idempotency (req_id TEXT PRIMARY KEY, seq INTEGER NOT NULL, ts INTEGER NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS pcs (anon_id TEXT PRIMARY KEY, family TEXT NOT NULL,
      version INTEGER NOT NULL DEFAULT 1, data TEXT NOT NULL, updated_at INTEGER NOT NULL)`,
+  /* S2 模块 B · 先攻双表：与 schema.sql 逐条等价（单一源，见 tools/check-worker.mjs ⑤）。
+     纯新增辅助表，无独立寿命，不参与计时；归零时两表一并清空（L1 / E5 / C2）。
+     本包只落 DDL 与守卫，指令执行层与还原路径由模块 B 后续独立步骤实现。 */
+  `CREATE TABLE IF NOT EXISTS combat (
+     id INTEGER PRIMARY KEY,
+     room_code TEXT NOT NULL,
+     round INTEGER NOT NULL DEFAULT 1,
+     cursor_entry_id INTEGER,
+     started_at INTEGER NOT NULL,
+     started_by TEXT
+   )`,
+  `CREATE TABLE IF NOT EXISTS combat_entry (
+     id INTEGER PRIMARY KEY,
+     combat_id INTEGER NOT NULL,
+     name TEXT NOT NULL,
+     owner TEXT,
+     card_ref TEXT,
+     value INTEGER NOT NULL,
+     dex_mod INTEGER NOT NULL DEFAULT 0,
+     created_at INTEGER NOT NULL,
+     created_by TEXT
+   )`,
 ];
 
 /* ★★ 索引必须**在建表 + 迁移之后**单独建（2026-10-31 线上事故 · 房间 009950 打不开）★★

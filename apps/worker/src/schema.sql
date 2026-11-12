@@ -95,4 +95,31 @@ CREATE TABLE IF NOT EXISTS pcs (
   updated_at INTEGER NOT NULL
 );
 
+-- S2 模块 B · 先攻双表（纯新增，不动老表列）
+-- 辅助表无独立寿命：不参与计时，随计时主体归零一并清空（L1 / E5 / C2）。
+-- 三段式迁移：新表写成 CREATE TABLE IF NOT EXISTS，对已存在的旧房间是纯新增，
+-- DO 休眠唤醒时自然长出两张空表；不 ALTER 老表列、不重建表（009950）。
+CREATE TABLE IF NOT EXISTS combat (
+  id INTEGER PRIMARY KEY,
+  room_code TEXT NOT NULL,
+  round INTEGER NOT NULL DEFAULT 1,
+  cursor_entry_id INTEGER,
+  started_at INTEGER NOT NULL,
+  started_by TEXT
+);
+CREATE TABLE IF NOT EXISTS combat_entry (
+  id INTEGER PRIMARY KEY,
+  combat_id INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  owner TEXT,
+  card_ref TEXT,
+  value INTEGER NOT NULL,
+  dex_mod INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  created_by TEXT
+);
+-- 排序键 value DESC, dex_mod DESC, id ASC：id 自增天然唯一且严格递增，
+-- 批量 N# 在同一毫秒建多行时不会隐式依赖 rowid 造成排序不稳（I·3.4.2 ⑦）。
+-- 不挂 HP / 逐骰明细 / expr / 阵营 / 权限 / acted 字段（I·3.5 / I·1 第 17 项）。
+
 -- 说明：无 visibility 列 —— 全员同权限、无暗骰，广播/历史/导出/导入四处过滤逻辑全部消失。
