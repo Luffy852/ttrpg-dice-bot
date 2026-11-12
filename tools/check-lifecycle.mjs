@@ -29,9 +29,10 @@ const ok = (n, c, extra) => { if(c) pass++; else { fail++; console.log('  ❌ ' 
 
 const roomRaw   = read('apps/worker/src/room.js');
 const schemaRaw = read('apps/worker/src/schema.sql');
+const coreRaw   = read('apps/worker/src/core.js');
 const stripJs  = t => t.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(?<!:)\/\/[^\n]*/g, '');
 const stripSql = t => t.replace(/\/\*[\s\S]*?\*\//g, '').replace(/--[^\n]*/g, '');
-const room = stripJs(roomRaw), schema = stripSql(schemaRaw);
+const room = stripJs(roomRaw), schema = stripSql(schemaRaw), core = stripJs(coreRaw);
 
 /* ---------------------------------------------------------------------------
  * CONTRACT：§0.4 / 附录 G 已定口径的**可执行副本**（改口径先改档案再改这里）
@@ -54,22 +55,46 @@ const CONTRACT = {
     /INSERT\s+(?:OR\s+IGNORE\s+)?INTO\s+room\s*\([^)]*\blast_active\b/i,  // 建房时写初始值的列清单
     /UPDATE\s+room\s+SET\s+last_active\s*=\s*\?/,         // 记账写入
   ],
-  /* ⑧ 还原规格（B1–B3 / §8.6 / E5） */
-  forbiddenCols:   ['total_joins', 'reset_at'],           // B3 不加列；reset_at 属功能开发轮
-  forbiddenTables: ['combat', 'combat_entry'],            // §8.6 优化补完轮不预建
-  futureClearTables: ['combat', 'combat_entry'],          // E5：两表都必须进清空辅助表清单
+  /* ⑧ 还原规格（B1–B3 / §8.6 / E5）
+   * ★ S2 边界修正（用户 2026-11-12 确认）：优化补完轮「不预建两表 / 不加 reset_at 列」的禁令
+   *   到功能开发轮为止失效 —— 两表由模块 B 第一包预建，reset_at 由模块 B 还原路径独立步骤引入。
+   *   total_joins 是 B3 跨阶段永久口径（清 members 即归零），任何阶段出现即红，不动。 */
+  forbiddenCols:   ['total_joins'],                      // B3 永久：schema 出现该列即红
+  anchorCols:      ['reset_at'],                         // 功能开发轮独立步骤的锚点列；当前未引入，不判红
+  prebuiltTables:  ['combat', 'combat_entry'],           // E5：功能开发轮允许预建
+  futureClearTables: ['combat', 'combat_entry'],         // E5：两表都必须进清空辅助表清单
+  judgeTables:     ['messages', 'idempotency'],          // C1：计时主体只读这两张
+  clearOrder:      ['combat_entry', 'combat'],           // C2：先删条目再删战斗行，避免 cursor 悬空
   resetDefaults: {
     rule: "'generic'", baredice: '0',
     clearFields: ['rule_set_by', 'rule_set_at'],
     clearTable: 'members', noMessage: true,
   },
-  knownDebt: 'room.js 的 alarm 提醒段当前 allocSeq + insertMsgs 落 sys 消息（坑 2 / 口径 6），属 S1 现状；功能开发轮改造，优化补完轮不动 room.js，本脚本不把它判红',
+  knownDebt: 'room.js 的 alarm 提醒段当前 allocSeq + insertMsgs 落 sys 消息（坑 2 / 口径 6），属 S1 现状；功能开发轮还原路径独立步骤改造，本脚本不把它判红',
 };
 
 /** 找出「还原 / 重置」函数（将来功能开发轮新增的路径），花括号配平取整个函数体 */
 function resetBlocks(src){
   const out = [];
   const re = /(?:^|\n)\s*(?:async\s+)?(?:function\s+)?(\w*(?:reset|restore|还原)\w*)\s*\([^)]*\)\s*\{/gi;
+  let m;
+  while((m = re.exec(src))){
+    const brace = re.lastIndex - 1;
+    let depth = 0, j = brace;
+    for(; j < src.length; j++){
+      if(src[j] === '{') depth++;
+      else if(src[j] === '}'){ depth--; if(depth === 0){ j++; break; } }
+    }
+    out.push({name:m[1], body:src.slice(brace, j)});
+  }
+  return out;
+}
+/* 按函数名提取函数体（花括号配平）：C1/C4/C5 要把扫描范围限定在 alarm / planImport 内，
+ * 否则 TABLES 里的 DDL 与注释里的表名会把「读辅助表」误判成违规（#46 同型）。
+ * 认 class 方法（async alarm(){}）与顶层导出函数（export async function planImport(){}）。 */
+function namedBlocks(src, nameRe){
+  const out = [];
+  const re = new RegExp('(?:^|\\n)\\s*(?:export\\s+)?(?:async\\s+)?(?:function\\s+)?(' + nameRe + ')\\s*\\([^)]*\\)\\s*\\{', 'g');
   let m;
   while((m = re.exec(src))){
     const brace = re.lastIndex - 1;
@@ -137,10 +162,22 @@ console.log('== ⑧ 还原规格守恒（B1–B3 / §8.6 / E5）==');
 {
   const ddl = schema + '\n' + room;   // 两份 DDL 都扫（schema.sql 是唯一出处，room.js 是运行时副本）
   const colHits = CONTRACT.forbiddenCols.filter(c => new RegExp('\\b' + c + '\\b').test(ddl));
-  ok('★ schema 不含 total_joins / reset_at 列（B3 不加列 / §0.5 第 11 条）',
+  ok('★ schema 不含 total_joins 列（B3 永久：清 members 即归零）',
     colHits.length === 0, colHits.join(','));
-  const tblHits = CONTRACT.forbiddenTables.filter(t => new RegExp('CREATE\\s+TABLE[^;]*\\b' + t + '\\b', 'i').test(ddl));
-  ok('★ 不预建 combat / combat_entry 表（§8.6）', tblHits.length === 0, tblHits.join(','));
+  ok('★ 探针：total_joins 出现即红（自证）',
+    CONTRACT.forbiddenCols.some(c => new RegExp('\\b' + c + '\\b').test('ALTER TABLE room ADD COLUMN total_joins INTEGER')));
+  /* ★ S2 边界修正：两表从「禁止预建」改为「允许预建 + 必须登记进 E5 清空清单」。
+     禁令只服务优化补完轮；模块 B 第一包预建后，真正要守住的是「归零时两张都清」。 */
+  const registered = (tables, list) => tables.every(t => list.includes(t));
+  ok('★ E5 两表允许预建且已登记进清空辅助表清单',
+    CONTRACT.prebuiltTables.length === 2 &&
+    registered(CONTRACT.prebuiltTables, CONTRACT.futureClearTables) &&
+    CONTRACT.futureClearTables.length === 2);
+  ok('★ 探针：漏登记一张表即被抓（自证）',
+    registered(CONTRACT.prebuiltTables, CONTRACT.futureClearTables) &&
+    !registered(CONTRACT.prebuiltTables, ['combat']));
+  ok('★ 锚点列 reset_at 归属功能开发轮独立步骤（当前未引入，不判红）',
+    CONTRACT.anchorCols.includes('reset_at') && !/\breset_at\b/.test(ddl));
   const d = CONTRACT.resetDefaults;
   ok('★ 规格常量含 B2 / B3 还原项（rule 回默认 / baredice=0 / 清设定者 / 清 members / 零消息）',
     d.rule === "'generic'" && d.baredice === '0' && d.clearFields.length === 2 &&
@@ -161,6 +198,89 @@ console.log('== ⑧ 还原规格守恒（B1–B3 / §8.6 / E5）==');
   ok('★ 探针：合规还原路径通过 / 缺项还原路径被抓（自证）',
     gb.length === 1 && must.every(p => p.test(gb[0].body)) &&
     sb.length === 1 && must.some(p => !p.test(sb[0].body)));
+}
+
+console.log('== ⑨ C1–C5 先攻表清理守恒（附录 I·3.8.2 · S2 模块 B 第一包装守卫）==');
+{
+  const alarms = namedBlocks(room, 'alarm');
+  const alarmBody = alarms.map(b => b.body).join('\n');
+  const resets = resetBlocks(room);
+  const resetBody = resets.map(b => b.body).join('\n');
+  const delAux = /\bDELETE\s+FROM\s+(?:combat|combat_entry)\b/i;
+
+  /* ---------- C1 清理判据被污染 ---------- */
+  /* 辅助表「只清不读」：抹掉 DELETE 语句里的表名后，任何 FROM combat* 都是把辅助表行数
+     当存活 / 归零判据 —— 与 §8.5 坑 5（last_active 被 alarm 自己续写）完全同型。 */
+  const readsAux = s => {
+    const noDel = s.replace(/\bDELETE\s+FROM\s+(?:combat|combat_entry)\b/gi, 'DELETE FROM __aux__');
+    return /\bFROM\s+(?:combat|combat_entry)\b/i.test(noDel);
+  };
+  ok('★ C1 计时判据只读 messages / idempotency（alarm 与还原路径都不读辅助表）',
+    alarms.length > 0 && !readsAux(alarmBody) && !readsAux(resetBody),
+    'alarm=' + alarms.length + ' reset=' + resets.length);
+  ok('★ C1 常量登记：计时主体恰为 messages + idempotency',
+    CONTRACT.judgeTables.length === 2 && CONTRACT.judgeTables.includes('messages') && CONTRACT.judgeTables.includes('idempotency'));
+  ok('★ C1 探针：把 combat_entry 行数塞进判据即抓，纯清表放行（自证）',
+    readsAux('async alarm(){ if(SELECT COUNT(*) FROM combat_entry > 0) return; }') &&
+    !readsAux('async alarm(){ DELETE FROM combat_entry; DELETE FROM combat; }'));
+
+  /* ---------- C2 漏清一张表 ---------- */
+  const clearAt = (b, t) => b.body.search(new RegExp('DELETE\\s+FROM\\s+' + t + '\\b', 'i'));
+  const clearOK = b => {
+    const a = clearAt(b, 'combat_entry'), c = clearAt(b, 'combat');
+    return a >= 0 && c > a;
+  };
+  ok('★ C2 还原路径（若存在）必须成对清两表，顺序先 combat_entry 后 combat（当前 ' + resets.length + ' 个）',
+    resets.every(clearOK), resets.filter(b => !clearOK(b)).map(b => b.name).join(','));
+  ok('★ C2 常量登记：清空顺序与定稿一致',
+    CONTRACT.clearOrder.length === 2 && CONTRACT.clearOrder[0] === 'combat_entry' && CONTRACT.clearOrder[1] === 'combat');
+  const c2good = 'async resetRoom(){ this.sql.exec("DELETE FROM combat_entry"); this.sql.exec("DELETE FROM combat"); }';
+  const c2miss = 'async resetRoom(){ this.sql.exec("DELETE FROM combat"); }';
+  const c2swap = 'async resetRoom(){ this.sql.exec("DELETE FROM combat"); this.sql.exec("DELETE FROM combat_entry"); }';
+  ok('★ C2 探针：漏一张 / 顺序反都抓到，合规样本放行（自证）',
+    resetBlocks(c2good).length === 1 && clearOK(resetBlocks(c2good)[0]) &&
+    resetBlocks(c2miss).length === 1 && !clearOK(resetBlocks(c2miss)[0]) &&
+    resetBlocks(c2swap).length === 1 && !clearOK(resetBlocks(c2swap)[0]));
+
+  /* ---------- C3 重置路径发广播（落库消息） ---------- */
+  /* 瞬时帧（this.broadcast({t:...})）允许：不落库、不占 seq、不续活（G·8.4 ②）。
+     禁止的是落库消息与占 seq —— 那会把计时主体自续到永不到期。 */
+  const noMsg = b => hitCalls(b.body).length === 0 &&
+    !/kind\s*:\s*['"](?:sys|notice)['"]/.test(b.body);
+  ok('★ C3 还原路径零消息 / 零 seq / 零续期 / 零落库广播（当前 ' + resets.length + ' 个）',
+    resets.every(noMsg), resets.filter(b => !noMsg(b)).map(b => b.name).join(','));
+  const c3bad  = 'async resetRoom(){ const s = await this.storage().allocSeq(1); await this.storage().insertMsgs([{kind:"sys"}]); }';
+  const c3good = 'async resetRoom(){ this.broadcast({t:OUT.STATE}); this.sql.exec("DELETE FROM combat_entry"); }';
+  ok('★ C3 探针：落库消息即抓，瞬时帧放行（自证）',
+    resetBlocks(c3bad).length === 1 && !noMsg(resetBlocks(c3bad)[0]) &&
+    resetBlocks(c3good).length === 1 && noMsg(resetBlocks(c3good)[0]));
+
+  /* ---------- C4 战斗中掉表 ---------- */
+  const rolling = [...alarmBody.matchAll(/DELETE\s+FROM\s+(\w+)/gi)].map(m => m[1].toLowerCase());
+  ok('★ C4 alarm 的滚动 DELETE 只动计时主体两表',
+    rolling.length > 0 && rolling.every(t => CONTRACT.judgeTables.includes(t)), rolling.join(','));
+  let rest = room;
+  resets.forEach(b => { rest = rest.replace(b.body, ' '.repeat(b.body.length)); });
+  ok('★ C4 清辅助表只允许出现在还原路径（逐条到期 DELETE 不得级联）', !delAux.test(rest));
+  ok('★ C4 探针：alarm 里顺手清表即被抓，只删 messages 放行（自证）',
+    delAux.test('async alarm(){ this.sql.exec("DELETE FROM combat_entry WHERE 1=1"); }') &&
+    !delAux.test('async alarm(){ this.sql.exec("DELETE FROM messages WHERE ts < ?", cut); }'));
+
+  /* ---------- C5 导入战报重建状态 ---------- */
+  const plans = namedBlocks(core, 'planImport');
+  const planBody = plans.map(b => b.body).join('\n');
+  ok('★ C5 planImport 只处理 messages：不重放指令、不碰先攻表',
+    plans.length === 1 && !/\bcombat(?:_entry)?\b/.test(planBody) &&
+    !/handleCommand/.test(planBody) && /mergeOrder/.test(planBody),
+    'plans=' + plans.length);
+  const c5bad = 'export async function planImport(storage, incoming, nowMs){ await storage.handleCommand(incoming); this.sql.exec("DELETE FROM combat_entry"); }';
+  ok('★ C5 探针：导入回放指令 / 写先攻表即被抓（自证）',
+    namedBlocks(c5bad, 'planImport').length === 1 &&
+    /handleCommand|\bcombat(?:_entry)?\b/.test(namedBlocks(c5bad, 'planImport')[0].body));
+
+  console.log('  ⚠️ 现状登记（不判红）：当前无还原 / 重置路径，C2 / C3 为「盯将来路径」守卫；');
+  console.log('    模块 B 还原路径独立步骤实现后自动生效（清表函数名须含 reset / restore / 还原；');
+  console.log('    瞬时帧允许、落库消息禁止；两表必须成对清且先条目后战斗行）。');
 }
 
 console.log('---------------------------');

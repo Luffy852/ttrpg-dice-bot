@@ -36,9 +36,26 @@ const db = new SQL.Database();
   for(const s of stmts){ try{ db.run(s); }catch(e){ err = s.slice(0, 60) + ' → ' + e.message; break; } }
   ok('全部 DDL 执行成功', !err, err);
   const tables = db.exec("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")[0].values.flat();
-  ok('建出 5 张表', tables.length === 5, tables.join(','));
-  ok('表齐：room/members/messages/idempotency/pcs',
-    ['idempotency','members','messages','pcs','room'].every(t => tables.includes(t)), tables.join(','));
+  /* ★ S2 模块 B 第一包：S1 五张表 + 先攻双表（纯新增，不动老表列） */
+  ok('建出 7 张表（S1 五张 + combat / combat_entry）', tables.length === 7, tables.join(','));
+  ok('表齐：room/members/messages/idempotency/pcs/combat/combat_entry',
+    ['combat','combat_entry','idempotency','members','messages','pcs','room'].every(t => tables.includes(t)), tables.join(','));
+  const colsOf = t => db.exec('PRAGMA table_info(' + t + ')')[0].values.map(r => r[1]);
+  const cCombat = colsOf('combat'), cEntry = colsOf('combat_entry');
+  ok('★ combat 列集合与 I·3.5 定稿一致（6 列）',
+    ['id','room_code','round','cursor_entry_id','started_at','started_by'].every(k => cCombat.includes(k)) && cCombat.length === 6,
+    cCombat.join(','));
+  ok('★ combat_entry 列集合与 I·3.5 定稿一致（9 列）',
+    ['id','combat_id','name','owner','card_ref','value','dex_mod','created_at','created_by'].every(k => cEntry.includes(k)) && cEntry.length === 9,
+    cEntry.join(','));
+  const combatSql = db.exec("SELECT sql FROM sqlite_master WHERE name='combat'")[0].values[0][0];
+  const entrySql  = db.exec("SELECT sql FROM sqlite_master WHERE name='combat_entry'")[0].values[0][0];
+  ok('★ combat.id 自增主键 / cursor_entry_id 指向条目 id',
+    /id\s+INTEGER\s+PRIMARY\s+KEY/i.test(combatSql) && /cursor_entry_id/.test(combatSql));
+  ok('★ combat_entry.id 自增主键（排序第三键唯一严格递增，批量同毫秒不飘）',
+    /id\s+INTEGER\s+PRIMARY\s+KEY/i.test(entrySql));
+  ok('★ 双表无越界字段（HP / 逐骰明细 / expr / 阵营 / 权限 / acted / tie_break）',
+    ![...cCombat, ...cEntry].some(k => /^(hp|dice|expr|side|tie_break|acted|acted_this_round|owner_anon_id|visibility)$/i.test(k)));
   const idx = db.exec("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx%'")[0].values.flat();
   /* ★ 按**名字**断言而不是数个数：数个数的断言每加一个索引就要改一次，
    *   而真正要保证的是"该有的都在"（漏一个索引只会让清理/查询变慢，不报错 —— 更难发现）。 */
@@ -125,6 +142,67 @@ console.log('== 3. 索引与约束真的生效（不是建了就完事） ==');
   ok('★ ts 查询走 idx_messages_ts', /idx_messages_ts/.test(plan), plan);
   const plan2 = db2.exec("EXPLAIN QUERY PLAN SELECT * FROM messages WHERE anon_id = 'a1' ORDER BY seq")[0].values.flat().join(' ');
   ok('★ 按人查询走 idx_messages_sender', /idx_messages_sender/.test(plan2), plan2);
+}
+
+/* ==========================================================================
+ * 4. C4 / C5 真跑：逐条清理与导入重排都不碰先攻表（附录 I·3.8.2）
+ * ★ 用 room.js 里的真实 DELETE 语句与 core.js 的生产 planImport，不抄测试替身（#18）。
+ * ★ 边界：当前无还原 / 重置路径，「归零时两表一并清空」由模块 B 独立步骤实现，
+ *   本组不假装验过它；这里验的是「战斗进行中，清理 / 导入不掉表」。
+ * ========================================================================== */
+console.log('== 4. C4 / C5 真跑：逐条清理与导入重排都不碰先攻表 ==');
+{
+  const db3 = new SQL.Database();
+  ddl.split(';').map(s => s.trim()).filter(s => s && !/^PRAGMA/i.test(s)).forEach(s => db3.run(s));
+  const count3 = t => db3.exec('SELECT COUNT(*) AS c FROM ' + t)[0].values[0][0];
+  const now = 1772000000000, DAY = 86400000;
+  /* 造一场「战斗进行中」 */
+  db3.run(`INSERT INTO combat (id, room_code, round, cursor_entry_id, started_at, started_by)
+           VALUES (1, '123456', 1, 2, ${now}, '老王')`);
+  db3.run(`INSERT INTO combat_entry (id, combat_id, name, owner, card_ref, value, dex_mod, created_at, created_by)
+           VALUES (1, 1, '老王', '老王', NULL, 17, 3, ${now}, '老王')`);
+  db3.run(`INSERT INTO combat_entry (id, combat_id, name, owner, card_ref, value, dex_mod, created_at, created_by)
+           VALUES (2, 1, '哥布林1', '老王', NULL, 14, 0, ${now}, '老王')`);
+  /* 造「部分过期」的消息：一条 31 天前、一条今天 */
+  db3.run(`INSERT INTO messages (seq, id, ts, kind, from_name, payload)
+           VALUES (1, '123456:1', ?, 'cmd', '老王', '{"text":".ri"}')`, [now - 31 * DAY]);
+  db3.run(`INSERT INTO messages (seq, id, ts, kind, from_name, payload)
+           VALUES (2, '123456:2', ?, 'cmd', '老王', '{"text":".init"}')`, [now]);
+  db3.run(`INSERT INTO idempotency (req_id, seq, ts) VALUES ('r1', 1, ?)`, [now - 31 * DAY]);
+  db3.run(`INSERT INTO idempotency (req_id, seq, ts) VALUES ('r2', 2, ?)`, [now]);
+
+  /* ★ C4：从 room.js 源码里取真实清理语句（测试与生产同源，避免抄一份漂移） */
+  const roomSrc = fs.readFileSync(path.join(ROOT, 'apps', 'worker', 'src', 'room.js'), 'utf8');
+  const delMsgs = (roomSrc.match(/'(DELETE FROM messages WHERE ts < \?[^']*)'/) || [])[1];
+  const delIdem = (roomSrc.match(/'(DELETE FROM idempotency WHERE ts < \?)'/) || [])[1];
+  ok('★ C4 取到 room.js 的真实清理语句（不是测试替身）', !!delMsgs && !!delIdem);
+  if(delMsgs && delIdem){
+    db3.run(delMsgs, [now - 30 * DAY, now]);
+    db3.run(delIdem, [now - 30 * DAY]);
+  }
+  eq('★ C4 战斗中滚动 DELETE 后先攻条目数不变', count3('combat_entry'), 2);
+  eq('★ C4 战斗中滚动 DELETE 后战斗行不变', count3('combat'), 1);
+  eq('★ C4 过期消息确实被删（断言不是摆设）', count3('messages'), 1);
+  eq('★ C4 过期幂等键确实被删', count3('idempotency'), 1);
+
+  /* ★ C5：生产 planImport 产出重排计划，再在真库上按同形态落库 */
+  const {planImport} = await import('../apps/worker/src/core.js');
+  const {createMemoryStorage} = await import('./memory_storage.mjs');
+  const mem = createMemoryStorage('123456');
+  await mem.setRoom({seq:2});
+  await mem.insertMsgs([{seq:2, id:'123456:2', ts:now, kind:'cmd', from:'老王', payload:{text:'.init'}}]);
+  const incoming = [{seq:1, id:'999999:1', ts:now - 1000, kind:'cmd', from:'别人', payload:{text:'.ri'}}];
+  const plan = await planImport(mem, incoming, now);
+  ok('★ C5 planImport 产出只含 messages 重排字段，不含 combat 写操作',
+    Object.keys(plan).every(k => ['add','reseq','seqEnd','idem','skipped','errs'].includes(k)) &&
+    !JSON.stringify(plan).includes('combat'), Object.keys(plan).join(','));
+  (plan.reseq || []).forEach(([id, seq]) => db3.run('UPDATE messages SET seq = ? WHERE id = ?', [seq, id]));
+  (plan.add || []).forEach(m => db3.run(
+    'INSERT INTO messages (seq, id, ts, kind, from_name, payload) VALUES (?, ?, ?, ?, ?, ?)',
+    [m.seq, m.id, m.ts, m.kind, m.from, JSON.stringify(m.payload)]));
+  eq('★ C5 导入落库后先攻条目数不变', count3('combat_entry'), 2);
+  eq('★ C5 导入落库后战斗行不变', count3('combat'), 1);
+  eq('★ C5 导入确实新增一条消息（断言不是摆设）', count3('messages'), 2);
 }
 
 console.log('---------------------------');
