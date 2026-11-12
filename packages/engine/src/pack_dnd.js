@@ -16,6 +16,30 @@ const DND_PACK = {
   family:'dnd',
   supportsCheck:true,
   needsCard:true,
+  /* ★ S2 模块 B（I·3.1）：可选字段 —— 不是 pack-contract.js 的必选契约字段，
+   *   其余 4 个规则包一律不写，T6a 契约断言与 5 个包零增补。
+   *   verbs 里的值是**声明**（状态型动词，要写 DO 的 combat* 表），不是执行函数；
+   *   引擎 cmd.js 只对函数型专属动词执行，Worker 侧用 initiative 查表放行。 */
+  verbs: {
+    ri:   {kind:'state', worker:'initiative'},
+    init: {kind:'state', worker:'initiative'}
+  },
+  initiative: {
+    // 默认公式的基底；敏捷调整值由 Worker 侧从卡读快照后按符号规范化拼上（I·3.4.2）
+    defaultFormula: 'd20',
+    supports: ['dnd5e', 'dnd5r'],
+    /* 归属提示按族给两个目标：verbOwner 遍历首个命中恒为 dnd5e，单值提示会让 5.5e 房
+     * 看到指错版本的指引。引擎兜底与 Worker 侧共用这两段文案（单一源，不写第二份）。 */
+    ownerNote(ruleName){
+      return '「<b>.ri / .init</b>」是 <b>D&D 5e / 5.5e</b> 规则下指令，当前规则「' +
+        esc(ruleName) + '」下不可用 —— 用 <b>.set rule dnd</b> / <b>.set rule dnd5r</b> 切换。';
+    },
+    mismatchNote(ruleName){
+      return '这是 <b>D&D 先攻表</b>，当前规则「' + esc(ruleName) +
+        '」下不可用 —— 用 <b>.set rule dnd</b> / <b>.set rule dnd5r</b> 切回后恢复，' +
+        '或用 <b>.init clear</b> / <b>.init 战斗结束</b> 清理。';
+    }
+  },
   checkHint(){ return '用法：<b>.rc 力量</b>　·　<b>.rc 巧手 熟练</b>　·　<b>.rc 察觉 15 熟练</b>　·　<b>.rc list</b> 看全部名字'; },
   checkOffNote(){ return null; },
   cardTemplate(){

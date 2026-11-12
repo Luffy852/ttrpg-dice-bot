@@ -276,6 +276,16 @@ console.log('== ⑨ C1–C5 先攻表清理守恒（附录 I·3.8.2 · 第二步
   };
   ok('★ C2 RESET_SQL 成对清两表，顺序先 combat_entry 后 combat（resetRoom 执行它）',
     clearOK(resetSql) && resets.length === 1 && /RESET_SQL\.forEach/.test(resetBody));
+  /* ★ S2 模块 B 第三步先红后绿补强：只查「出现过 DELETE FROM」会放过
+   *   `DELETE FROM combat_entry WHERE 0` 这类恒假条件 —— 表看似清了、条目全残留，
+   *   直接违反 B3「还原后等同全新房间」。归零必须是无条件整表清，两语句逐字精确。 */
+  const resetStmts = [...resetSql.matchAll(/['"]([^'"]*DELETE[^'"]*)['"]/gi)].map(m => m[1].trim());
+  /* RESET_SQL 还含 pcs / members 两条整表清 —— 只挑 combat* 两表做逐字精确比对 */
+  const combatStmts = resetStmts.filter(x => /^DELETE FROM (?:combat_entry|combat)\b/i.test(x));
+  ok('★ C2 归零清表是两条无 WHERE 的整表 DELETE（堵恒假条件漏清）',
+    combatStmts.length === 2 &&
+    /^DELETE FROM combat_entry$/i.test(combatStmts[0]) && /^DELETE FROM combat$/i.test(combatStmts[1]),
+    JSON.stringify(combatStmts));
   ok('★ C2 清辅助表只出现在 RESET_SQL（计时 SQL 区不得出现）', !delAux.test(sqlZone));
   ok('★ C2 常量登记：清空顺序与定稿一致',
     CONTRACT.clearOrder.length === 2 && CONTRACT.clearOrder[0] === 'combat_entry' && CONTRACT.clearOrder[1] === 'combat');
@@ -308,8 +318,19 @@ console.log('== ⑨ C1–C5 先攻表清理守恒（附录 I·3.8.2 · 第二步
   ok('★ C4 滚动 DELETE 只动计时主体两表',
     rolling.length === 2 && rolling.every(t => CONTRACT.judgeTables.includes(t)), rolling.join(','));
   const noResetSql = life.replace(/RESET_SQL\s*=\s*\[[\s\S]*?\];/, '');
-  ok('★ C4 清辅助表只允许出现在 RESET_SQL（逐条到期 DELETE 不得级联）',
-    !delAux.test(room + '\n' + noResetSql));
+  /* ★ S2 模块 B 第三步：清辅助表有且仅有两条合法路径 ——
+   *   ① 系统归零（lifecycle.js 的 RESET_SQL，零消息零广播）；
+   *   ② 用户指令「结束整场战斗」（room.js combatApply 的 clear op，I·3.2）。
+   *   ② 不是 alarm 滚动 DELETE，不会让战斗打到一半掉表；但必须成对且顺序正确（C2）。
+   *   这里只排除那一处合规语句，剩下任何 DELETE FROM combat* 仍一律判红。 */
+  const userClear = /sql\.exec\('DELETE FROM combat_entry'\);\s*sql\.exec\('DELETE FROM combat'\);/;
+  /* 用户指令「.init del 删一个条目」也是合法局部操作（I·3.2），不是 alarm 滚动 DELETE；
+   *   它同样落在 combatApply 里，一并排除。剩下任何位置出现 DELETE FROM combat* 仍判红。 */
+  const userDeleteOne = /sql\.exec\('DELETE FROM combat_entry WHERE name = \?', n\);/g;
+  const roomNoUserPath = room.replace(userClear, '').replace(userDeleteOne, '');
+  ok('★ C4 用户指令清空路径成对且顺序正确（I·3.2 / C2）', userClear.test(room));
+  ok('★ C4 清辅助表只允许出现在系统归零 / 用户指令清空两处（逐条到期 DELETE 不得级联）',
+    !delAux.test(roomNoUserPath + '\n' + noResetSql));
   ok('★ C4 探针：alarm 里顺手清表即被抓，只删 messages 放行（自证）',
     delAux.test('async alarm(){ this.sql.exec("DELETE FROM combat_entry WHERE 1=1"); }') &&
     !delAux.test('async alarm(){ this.sql.exec("DELETE FROM messages WHERE ts < ?", cut); }'));

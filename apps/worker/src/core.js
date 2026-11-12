@@ -16,6 +16,7 @@
  *   getIdem / putIdem / insertMsgs / recentRolls / since / history / brief / hasIds / reflow
  * ========================================================================== */
 import * as Engine from '../../../packages/engine/src/index.js';
+import {handleInitiative, INIT_VERBS} from './initiative.js';
 import {factsFromView} from '../../../packages/engine/src/replay.js';
 import {checkText, normalize, checkPayload, KIND} from '../../../packages/protocol/src/payload.js';
 import {tokenBucket, msgId, cursorOf} from '../../../packages/protocol/src/cursor.js';
@@ -130,12 +131,25 @@ export function createRoomCore(storage, opts){
      *   （裸骰开关若被本条指令自己打开，不该把这条 retroactive 算成指令），
      *   且与 M2 的 emit 顺序一致。isCommandText 的第二个参数就是房间状态，不能省。 */
     const userMsg = {kind:Engine.isCommandText(text, ctx.room) ? KIND.CMD : KIND.CHAT, payload:{text}};
-    const r = Engine.handleCommand(text, ctx);
-    const out = r.msgs;
+    const ts = now();
+    /* ★★ S2 模块 B · 4A 接缝（I·3.1）：先攻是「状态型」专属动词，要读写 combat* 两张
+     *   辅助表，引擎纯 ESM 碰不到 DO storage —— 必须在 Worker 层执行。
+     *   这里只按 verb 分流，handleInitiative 产出的仍是引擎风格的 msgs，后续
+     *   factsOf / allocSeq / putIdem / insertMsgs / 状态写回一条不动 ——
+     *   「用户原文 cmd 消息 + 幂等 + 游标」链路完整保住，续活由 room.js 的 refreshAnchor 覆盖。
+     *   ★ 不写 if(rule==='dnd')：归属判定在 handleInitiative 里走 rulePack(room.rule).initiative 查表。 */
+    const pc = Engine.parseCommand(text);
+    let out;
+    if(pc && INIT_VERBS.has(pc.verb)){
+      const ir = await handleInitiative({verb:pc.verb, rest:pc.rest, storage, ctx, nowMs:ts, anonId, nick});
+      out = ir.msgs;
+    } else {
+      const r = Engine.handleCommand(text, ctx);
+      out = r.msgs;
+    }
 
     const n = out.length + (userMsg ? 1 : 0);
     const base = await storage.allocSeq(n);
-    const ts = now();
     const msgs = [];
     let i = 0;
     if(userMsg){

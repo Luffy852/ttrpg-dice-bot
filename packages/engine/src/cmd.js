@@ -4,7 +4,7 @@
 import { ALIAS, lookupAlias } from './alias.js';
 import { cardMismatchNote, cardRuleName } from './card.js';
 import { HELP_BODY, helpTop } from './help.js';
-import { packOfFamily, rulePack, verbOwner } from './packs.js';
+import { packOfFamily, rulePack, verbOwner, RULE_PACKS } from './packs.js';
 import { parseExpr } from './parse.js';
 import { defsHtml, renderDefs } from './render.js';
 import { rollGroups } from './roll.js';
@@ -12,7 +12,10 @@ import { IMPLEMENTED, RULE_META, normalizeRule, ruleFamily, ruleToken } from './
 import { esc, hhmm } from './util.js';
 import { buildTotal, natMarkOf, natOf, sumKept } from './view.js';
 
-const VERBS = new Set(['r','h','help','status','stat','set','rule','name','nn','st','rc','ra','rd','dh','fu']);
+/* ★ S2 模块 B：ri / init 是「状态型」专属动词 —— 归属在这里登记（清单/切分锚点用），
+ *   执行层在 Worker（要写 combat* 表），core.apply 会先分流，生产链路不会走到本文件的
+ *   规则专属分支。运行时命中动词靠 card.js 的 verb 域 lookupAlias，不靠这个集合。 */
+const VERBS = new Set(['r','h','help','status','stat','set','rule','name','nn','st','rc','ra','rd','dh','fu','ri','init']);
 const LIMIT_MSG = '指令规模过大（单次骰数上限 100 / 面数上限 10000 / 合计 500）';
 const SYNTAX_MSG = '暂不支持该语法（括号/乘除/骰池等），可用 .help 查看支持的格式';
 const NO_CARD_MSG = '尚未绑定角色卡，可用 <b>.st set 力量 16 敏捷 14 体质 15 智力 10 感知 12 魅力 8 等级 5</b> 绑定；或直接用 <b>.r 1d20+3</b> 投掷';
@@ -338,21 +341,33 @@ function handleCommand(text, ctx){
     return {msgs:out, handled:true};
   }
 
-  // ---- 规则专属动词（.dh / .fu）：由规则包自己处理 ----
-  // ★ 打了别的规则的指令时不能静默 —— 告诉用户这条指令属于哪套规则、怎么切过去
-  if(verb === 'dh' || verb === 'fu'){
+  // ---- 规则专属动词：★ 按归属表取，不再硬编码 dh / fu（I·3.1）----
+  // 打了别的规则的指令时不能静默 —— 告诉用户这条指令属于哪套规则、怎么切过去。
+  // ★ 两类专属动词：① 纯计算型（.dh/.fu）包里是函数，引擎内闭环；
+  //   ② 状态型（.ri/.init）包里是**声明**（要写 DO 的 combat* 表），执行层在 Worker，
+  //      core.apply 先分流，生产链路不会走到这里；引擎只保留归属兜底，不执行、不回话。
+  //   归属提示文案由 DND_PACK.initiative.ownerNote / mismatchNote 单一源产出，Worker 侧共用。
+  const owner = verbOwner(verb);
+  if(owner){
     const pack = rulePack(room.rule);
     const fn = (pack.verbs && pack.verbs[verb]) || null;
+    if(typeof fn === 'function'){
+      const r = fn(rest.trim(), {card:ctx.card, ruleKey:room.rule, me});
+      if(r.notice){ notice(r.notice); return {msgs:out, handled:true}; }
+      say({kind:'roll', from:'骰娘', actor:me, view:r.view});
+      return {msgs:out, handled:true};
+    }
     if(!fn){
-      const owner = verbOwner(verb);
+      const ownPack = RULE_PACKS[owner];
+      if(ownPack && ownPack.initiative && ownPack.initiative.ownerNote){
+        notice(ownPack.initiative.ownerNote(RULE_META[room.rule].name));
+        return {msgs:out, handled:true};
+      }
       notice('「<b>.' + verb + '</b>」是 <b>' + esc(RULE_META[owner].name) + '</b> 的专属指令，当前规则「' +
         esc(RULE_META[room.rule].name) + '」下不可用 —— 用 <b>.set rule ' + esc(owner) + '</b> 切换，或 <b>.help ' + esc(owner) + '</b> 看用法。');
       return {msgs:out, handled:true};
     }
-    const r = fn(rest.trim(), {card:ctx.card, ruleKey:room.rule, me});
-    if(r.notice){ notice(r.notice); return {msgs:out, handled:true}; }
-    say({kind:'roll', from:'骰娘', actor:me, view:r.view});
-    return {msgs:out, handled:true};
+    // fn 是状态型声明：引擎不执行，交由 Worker 层（此处不回话，避免用户原文后再补一条空消息）
   }
 
   // ---- .rc / .ra / .rd 检定（★ 判定逻辑全在规则包里，主流程只做三件通用事）----

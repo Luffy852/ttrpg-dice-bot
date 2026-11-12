@@ -87,7 +87,29 @@ registerAliases('verb', [
   // 规则专属动词（M2）：匕首心 .dh / 最终物语 .fu。它们只在自己的规则包里可用，
   // 打错规则时主流程会给出"切到哪条规则"而不是静默不回话（见 verbOwner）
   {key:'dh',     display:'.dh',     aliases:['dh','动作掷骰','动作','二元骰']},
-  {key:'fu',     display:'.fu',     aliases:['fu','物语','物语检定','最终物语']}
+  {key:'fu',     display:'.fu',     aliases:['fu','物语','物语检定','最终物语']},
+  /* ★ S2 模块 B：先攻动词。中文只收「先攻 / 先攻表」两个（CJK_VERBS 长优先，
+   *   `.先攻表` 抢在 `.先攻` 之前；`.先攻表哥` 被 init 抢走是已接受的边角，写进帮助）。
+   *   模块 C 的 `.理智` / `.死豁` / `.死亡豁免` 按 I·消费状态表留到模块 C 注册，本步不动。 */
+  {key:'ri',     display:'.ri',     aliases:['ri','先攻']},
+  {key:'init',   display:'.init',   aliases:['init','先攻表']}
+]);
+/* ★ 先攻子命令单独成域，不与 verb / mode / switch 串味（I·3.4.1）。
+ *   normToken 去空格与下划线 → `.init 战斗 结束` 与 `.init 战斗结束` 免费等价；
+ *   `战斗结束` 与 `结束` 是两个独立键，精确 Map 匹配天然不互抢。 */
+registerAliases('initcmd', [
+  {key:'advance',   display:'推进一回合', aliases:['end','finish','over','结束','next','下一位']},
+  {key:'prev',      display:'回退',       aliases:['prev','回退','上一位']},
+  {key:'clear',     display:'清空',       aliases:['clear','clr','清空','清除']},
+  {key:'endcombat', display:'战斗结束',   aliases:['战斗结束']},
+  {key:'set',       display:'改值',       aliases:['set','设定','改','修改']},
+  {key:'del',       display:'删除',       aliases:['del','删除','移除']},
+  {key:'combat',    display:'结束整场',   aliases:['combat']}
+]);
+/* `.init combat <词>` 两段式：只收 3 个英文词（next 与中文「结束」均已删除，
+ *   避免与推进词表重叠造成误打）。`endcombat` 单 token 不注册 = 不合法。 */
+registerAliases('combatsub', [
+  {key:'end', display:'结束', aliases:['end','finish','over']}
 ]);
 registerAliases('mode', [
   {key:'adv', display:'优势', aliases:['adv','advantage','优势','有利','优']},
