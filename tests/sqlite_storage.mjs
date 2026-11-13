@@ -20,14 +20,19 @@ export function createSqliteStorage(db, code){
     return out;
   };
   const one = (sql, ...p) => q(sql, ...p)[0] || null;
-  const run = (sql, ...p) => { db.run(sql, p); };
+  /* ★ P1（补丁轮次第 1 步）：run 必须返回行数组。
+   *   原实现 `db.run(sql, p)` 无返回值，而 hasIds / brief / reflow / recent 四个方法
+   *   都依赖它的结果 —— 只要那条路径被跑到就 TypeError / undefined（坑 #42：
+   *   接口对齐 ≠ 口径对齐）。改成走同一个 q()，写语句返回空数组、读语句返回行，
+   *   顺带把「两条 SQL 执行路径」收敛成一条（单一源，不再各写一份 bind）。 */
+  const run = (sql, ...p) => q(sql, ...p);
   const rows2msgs = rows => rows.map(row2msg);
   function row2msg(r){
     return {seq:r.seq, id:r.id, ts:r.ts, kind:r.kind, from:r.from_name, actor:r.actor,
       anon_id:r.anon_id, req_id:r.req_id, rule_at:r.rule_at, payload:JSON.parse(r.payload)};
   }
   /* ★ S2 模块 B：先攻快照单一源（combatSnapshot 与 combatApply 返回值共用）。
-   *   只用 q / one 查询 —— 不依赖 run() 的返回值（该既有缺陷单列轮次 X3 修）。 */
+   *   P1 后 run() 已能返回行；这里仍只用 q / one，保持快照查询路径独立可读。 */
   const combatSnapshot = () => {
     const c = one('SELECT id, round, cursor_entry_id, started_at, started_by FROM combat LIMIT 1');
     const entries = q('SELECT id, combat_id, name, owner, card_ref, value, dex_mod, created_at, created_by ' +
