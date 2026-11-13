@@ -15,8 +15,10 @@ import { GEN_SPEC, genAttrs } from './gen_attrs.js';
 
 /* ★ S2 模块 B：ri / init 是「状态型」专属动词 —— 归属在这里登记（清单/切分锚点用），
  *   执行层在 Worker（要写 combat* 表），core.apply 会先分流，生产链路不会走到本文件的
- *   规则专属分支。运行时命中动词靠 card.js 的 verb 域 lookupAlias，不靠这个集合。 */
-const VERBS = new Set(['r','h','help','status','stat','set','rule','name','nn','st','rc','ra','rd','dh','fu','ri','init','coc','dnd']);
+ *   规则专属分支。运行时命中动词靠 card.js 的 verb 域 lookupAlias，不靠这个集合。
+ *   ★ S2 模块 C · C1：sc 是「计算型」专属动词（COC_PACK.verbs.sc 执行），同由 verbOwner 登记；
+ *   VERBS 只是动词清单，随注册同步（19→20；C2 加 ds 后 21）。 */
+const VERBS = new Set(['r','h','help','status','stat','set','rule','name','nn','st','rc','ra','rd','dh','fu','ri','init','coc','dnd','sc']);
 const LIMIT_MSG = '指令规模过大（单次骰数上限 100 / 面数上限 10000 / 合计 500）';
 const SYNTAX_MSG = '暂不支持该语法（括号/乘除/骰池等），可用 .help 查看支持的格式';
 const NO_CARD_MSG = '尚未绑定角色卡，可用 <b>.st set 力量 16 敏捷 14 体质 15 智力 10 感知 12 魅力 8 等级 5</b> 绑定；或直接用 <b>.r 1d20+3</b> 投掷';
@@ -381,8 +383,10 @@ function handleCommand(text, ctx){
         notice(ownPack.initiative.ownerNote(RULE_META[room.rule].name));
         return {msgs:out, handled:true};
       }
+      /* ★ S2 模块 C · C1：切规则提示用 ruleToken(owner)（文档里可直接照抄的最短别名），
+       *   而不是内部 key —— coc7 → coc，否则用户会看到「.set rule coc7」这种生硬写法。 */
       notice('「<b>.' + verb + '</b>」是 <b>' + esc(RULE_META[owner].name) + '</b> 的专属指令，当前规则「' +
-        esc(RULE_META[room.rule].name) + '」下不可用 —— 用 <b>.set rule ' + esc(owner) + '</b> 切换，或 <b>.help ' + esc(owner) + '</b> 看用法。');
+        esc(RULE_META[room.rule].name) + '」下不可用 —— 用 <b>.set rule ' + esc(ruleToken(owner)) + '</b> 切换，或 <b>.help ' + esc(ruleToken(owner)) + '</b> 看用法。');
       return {msgs:out, handled:true};
     }
     // fn 是状态型声明：引擎不执行，交由 Worker 层（此处不回话，避免用户原文后再补一条空消息）

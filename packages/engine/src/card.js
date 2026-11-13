@@ -90,7 +90,7 @@ registerAliases('verb', [
   {key:'fu',     display:'.fu',     aliases:['fu','物语','物语检定','最终物语']},
   /* ★ S2 模块 B：先攻动词。中文只收「先攻 / 先攻表」两个（CJK_VERBS 长优先，
    *   `.先攻表` 抢在 `.先攻` 之前；`.先攻表哥` 被 init 抢走是已接受的边角，写进帮助）。
-   *   模块 C 的 `.理智` / `.死豁` / `.死亡豁免` 按 I·消费状态表留到模块 C 注册，本步不动。 */
+   *   ★ 模块 C 的 `.理智` 已于 C1 在下方注册；`.死豁` / `.死亡豁免` 仍按 I·消费状态表留到 C2。 */
   {key:'ri',     display:'.ri',     aliases:['ri','先攻']},
   {key:'init',   display:'.init',   aliases:['init','先攻表']},
   /* ★ S2 模块 A：属性生成的两个全局小工具动词（I·2.2）。
@@ -99,7 +99,12 @@ registerAliases('verb', [
    *   rule 域出现，与 verb 域独立，detectConflicts() 实测无冲突。
    *   它们不绑 room.rule，注册在这里只为让 parseCommand 认得指令头。 */
   {key:'coc',    display:'.coc',    aliases:['coc']},
-  {key:'dnd',    display:'.dnd',    aliases:['dnd']}
+  {key:'dnd',    display:'.dnd',    aliases:['dnd']},
+  /* ★ S2 模块 C · C1（I·4.1）：`.sc` / `.理智` = 自动取卡上 SAN 的 `.rc 理智`。
+   *   中文只收「理智」这一个，不注册「理智检定」等更长形式；长前缀切出来的多余
+   *   技能名由 COC_PACK.verbs.sc 显式报错，不静默改检定目标（Q3）。
+   *   归属由 packs.js 的 verbOwner 单一源登记（只有 COC_PACK 有 verbs.sc）。 */
+  {key:'sc',     display:'.sc',     aliases:['sc','理智']}
 ]);
 /* ★ 先攻子命令单独成域，不与 verb / mode / switch 串味（I·3.4.1）。
  *   normToken 去空格与下划线 → `.init 战斗 结束` 与 `.init 战斗结束` 免费等价；
