@@ -193,6 +193,24 @@ console.log('== A1·验收 5 · DND 降序 / 补零 / 首行恒标准数组（I�
     new Set(dndRows(20).slice(1).map(r => r.k)).size === 20);
 }
 
+console.log('== A1·验收 5b · 组标记字体族（A3 真机反馈：第 10 条不能用彩色 emoji） ==');
+{
+  /* ★ 只有真浏览器渲染才看得见：🔟 是 U+1F51F 彩色 emoji，Chrome 会走 emoji 字体回退、
+   *   无视 .hk 的 monospace / color CSS，渲染成蓝底白字方块；其余 19 条是普通文本字符。
+   *   沙盒只能锁「码点」，故把「同族、非 emoji」写成可执行断言，防回退。 */
+  const marks = dndRows(20).slice(1).map(r => r.k);
+  eq('★ 第 10 条标记 = ⑩（U+2469），不是 🔟（U+1F51F）', marks[9], '⑩');
+  ok('★ 20 个标记都不含 emoji 码点（U+1F000 以上）',
+    marks.every(m => Array.from(m).every(ch => ch.codePointAt(0) < 0x1F000)),
+    JSON.stringify(marks));
+  ok('★ 10–20 落在 U+2469..U+2473 连续码点（与 11–20 同族同字体）',
+    marks.slice(9).every((m, j) => m.codePointAt(0) === 0x2469 + j),
+    JSON.stringify(marks.slice(9)));
+  eq('★ COC 与 DND 的 20 个组标记逐项相同（共用 groupMark）',
+    cocRows(20).filter(r => r.k).map(r => r.k).join(','), marks.join(','));
+  ok('★ 源码不再出现 🔟 的码点写法 1F51F', !/1F51F/i.test(CODE));
+}
+
 console.log('== A1·验收 6 · 不输出逐骰明细 / COC 派生值 / 体格表（I·2.3 / I·2.5 / I·2.7 第 8 条） ==');
 {
   const text = JSON.stringify(cocRows(2)) + JSON.stringify(dndRows(2));

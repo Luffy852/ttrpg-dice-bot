@@ -92,7 +92,14 @@ registerAliases('verb', [
    *   `.先攻表` 抢在 `.先攻` 之前；`.先攻表哥` 被 init 抢走是已接受的边角，写进帮助）。
    *   模块 C 的 `.理智` / `.死豁` / `.死亡豁免` 按 I·消费状态表留到模块 C 注册，本步不动。 */
   {key:'ri',     display:'.ri',     aliases:['ri','先攻']},
-  {key:'init',   display:'.init',   aliases:['init','先攻表']}
+  {key:'init',   display:'.init',   aliases:['init','先攻表']},
+  /* ★ S2 模块 A：属性生成的两个全局小工具动词（I·2.2）。
+   *   无中文别名 —— 设计稿的「.生成 / .造卡」易与中文句号「。」误切，
+   *   且 verb 域只收 2 字以上中文动词；coc / dnd 目前只在 rules.js 的
+   *   rule 域出现，与 verb 域独立，detectConflicts() 实测无冲突。
+   *   它们不绑 room.rule，注册在这里只为让 parseCommand 认得指令头。 */
+  {key:'coc',    display:'.coc',    aliases:['coc']},
+  {key:'dnd',    display:'.dnd',    aliases:['dnd']}
 ]);
 /* ★ 先攻子命令单独成域，不与 verb / mode / switch 串味（I·3.4.1）。
  *   normToken 去空格与下划线 → `.init 战斗 结束` 与 `.init 战斗结束` 免费等价；
