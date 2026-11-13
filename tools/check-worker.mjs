@@ -56,6 +56,52 @@ console.log('（core.js 用到 ' + used.size + ' 个方法：' + [...used].sort(
     'sqlite 独有=' + onlyA.join(',') + ' / memory 独有=' + onlyB.join(','));
 }
 
+
+/* ★ P3 · G·8.4 ② 字段链守恒（坑 #42：接口对齐 ≠ 口径对齐）
+ * 三份 storage 的 getRoom 方法名都在，却可能一致地漏返回 lastResetAt；
+ * core.buildCtx 不注入、或 cmd.js 无条件渲染，都让 .status 那一行变成摆设/空话。
+ * 这里把「三层都在、且条件渲染」锁成静态断言，任一处回退即红。 */
+console.log('== ①c P3 重置记录字段链守恒 ==');
+{
+  const roomSrc = read('apps/worker/src/room.js');
+  const sqSrc   = read('tests/sqlite_storage.mjs');
+  const memSrc  = read('tests/memory_storage.mjs');
+  const coreSrc2= read('apps/worker/src/core.js');
+  const cmdSrc  = read('packages/engine/src/cmd.js');
+  /* ★ 先红后绿补强：只数全文出现次数 / 用一个 every 包三份，会被注释里的同名字段
+     或「替身方法名都在却漏字段」骗过（坑 #42）。这里先去注释、再逐份截函数体验。 */
+  const clean = t => t.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+  const cRoom = clean(roomSrc), cSq = clean(sqSrc), cMem = clean(memSrc);
+  const getRoomBody = t => {
+    const i = t.indexOf('async getRoom()');
+    return i < 0 ? '' : t.slice(i, i + 460);
+  };
+  /* 空房间兜底分支在 getRoom() 尾部，460 字符截断不一定覆盖到 —— 那个字段在全文去注释后查，
+     不拿截断片段硬查（上一版常驻红就是这么来的，先红后绿差点变成假阳性）。 */
+  ok('★ 生产 getRoom() 返回 lastResetAt 且读的是 last_reset_at 列（不是 created_at）',
+    /lastResetAt\s*:\s*r\.last_reset_at/.test(getRoomBody(cRoom)) &&
+    /lastResetAt\s*:\s*null/.test(cRoom),
+    getRoomBody(cRoom).slice(-180));
+  ok('★ sqlite 替身 getRoom() 同样返回 lastResetAt 且读 last_reset_at 列',
+    /lastResetAt\s*:\s*r\.last_reset_at/.test(getRoomBody(cSq)) &&
+    /lastResetAt\s*:\s*null/.test(cSq),
+    getRoomBody(cSq).slice(-180));
+  ok('★ memory 替身默认 room 含 lastResetAt:null（三份同形）',
+    /const room = \{[\s\S]{0,260}lastResetAt\s*:\s*null/.test(cMem));
+  ok('★ core.buildCtx 用 ymdOf 注入 ctx.room.lastResetAt',
+    /lastResetAt\s*:\s*lastResetAt\s*\?\s*ymdOf\(lastResetAt\)\s*:\s*null/.test(coreSrc2));
+  ok('★ cmd.js 条件渲染「重置记录」行（lastResetAt 缺失时不展开）',
+    /\.\.\.\(room\.lastResetAt/.test(cmdSrc) && /k:'重置记录'/.test(cmdSrc) &&
+    /本房间已于 /.test(cmdSrc));
+  const condRe = /\.\.\.\(room\.lastResetAt/;
+  const injectRe = /lastResetAt\s*:\s*lastResetAt\s*\?\s*ymdOf\(lastResetAt\)\s*:\s*null/;
+  const colRe = /lastResetAt\s*:\s*r\.last_reset_at/;
+  ok('★ 探针：漏字段 / 读错列 / 无条件渲染 / 漏注入即被抓，合规样本放行（自证）',
+    condRe.test(cmdSrc) && !condRe.test("rows:[{k:'重置记录', v:'本房间已于 ' + room.lastResetAt + ' 重置'}]") &&
+    injectRe.test(coreSrc2) && !injectRe.test("return {room:{keepUntil:null}};") &&
+    colRe.test(cRoom) && !colRe.test("async getRoom(){ return {lastResetAt: r.created_at}; }"));
+}
+
 /* ★ S2 模块 B：先攻状态层的守恒（I·3.6 排序键 / 4A 接缝 / C2 清空顺序） */
 console.log('== ①b 先攻状态层守恒 ==');
 {

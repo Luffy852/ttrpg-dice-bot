@@ -7,7 +7,10 @@
  * 【注意】它是**测试替身**，不是生产实现；接口与 DO 版必须逐方法对齐。
  * ========================================================================== */
 export function createMemoryStorage(code){
-  const room = {code, rule:'generic', baredice:false, ruleSetBy:null, ruleSetAt:null, seq:0, created_at:Date.now()};
+  /* ★ P3：与 room.js 的 getRoom() 同形（lastResetAt:null = 从未重置过）。
+   *   测试替身不补这个字段，core.buildCtx 就注入不到，.status 那一行永远测不出来。 */
+  const room = {code, rule:'generic', baredice:false, ruleSetBy:null, ruleSetAt:null, seq:0,
+    created_at:Date.now(), lastResetAt:null};
   const msgs = [];                // 按 seq 升序
   const cards = new Map();
   const nicks = new Map();

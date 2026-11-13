@@ -1746,6 +1746,38 @@ console.log('== 26. 真机反馈第六轮（COC 卡呈现 4 条 · 2026-11-02）
   }
 }
 
+
+/* ★ P3 · G·8.4 ②：.status 的「本房间已于 X 重置」是房间字段呈现，不是聊天消息。
+ * 【为什么放引擎单测】这段渲染在 packages/engine，必须验「字段缺失时整行不渲染」——
+ *   Engine.makeRoom() 不带 lastResetAt，纯逻辑测试不能因为新字段而崩（§0.7 反向要求）。 */
+{
+  const base = () => ({me:'A', room:Engine.makeRoom(), card:null, history:[]});
+  /* ★ .status 走 page() → defs:{raw:html}，不是 rows 数组；断言必须查渲染后的串，
+     只查 defs.rows 会永远 undefined（真跑复现过，别再踩）。 */
+  const htmlOf = ctx => Engine.handleCommand('.status', ctx).msgs[0].html;
+  const withRow = base(); withRow.room.lastResetAt = '2026-02-25';
+  const h1 = htmlOf(withRow);
+  ok('★ P3 .status 有 lastResetAt 时出现「重置记录」行', /重置记录/.test(h1));
+  ok('★ P3 文案为「本房间已于 YYYY-MM-DD 重置」',
+    /本房间已于 \d{4}-\d{2}-\d{2} 重置/.test(h1) && /本房间已于 2026-02-25 重置/.test(h1));
+  ok('★ P3 该行排在「消息留存」之后、原有 6 行顺序不变',
+    h1.indexOf('消息留存') >= 0 && h1.indexOf('重置记录') > h1.indexOf('消息留存') &&
+    ['房间规则','规则设定者','我的昵称','裸骰识别','在场人数','消息留存']
+      .every(k => h1.indexOf(k) >= 0) && (h1.match(/class="hrow"/g) || []).length === 7,
+    'hrow 数=' + (h1.match(/class="hrow"/g) || []).length);
+  const h2 = htmlOf(base());
+  ok('★ P3 lastResetAt 为 undefined 时整行不渲染（不出现「本房间已于 重置」）',
+    !/重置记录/.test(h2) && !/本房间已于/.test(h2) &&
+    (h2.match(/class="hrow"/g) || []).length === 6,
+    'hrow 数=' + (h2.match(/class="hrow"/g) || []).length);
+  const nullCtx = base(); nullCtx.room.lastResetAt = null;
+  const h3 = htmlOf(nullCtx);
+  ok('★ P3 lastResetAt 为 null 时同样不渲染',
+    !/重置记录/.test(h3) && (h3.match(/class="hrow"/g) || []).length === 6);
+  ok('★ P3 defs 与 html 同源（raw 里也有该行，不是只挂在 html 上）',
+    /重置记录/.test(JSON.stringify(Engine.handleCommand('.status', withRow).msgs[0].defs)));
+}
+
 console.log('\n---------------------------');
 console.log('通过 ' + pass + ' 项，失败 ' + fail + ' 项' + (FOUND.stale ? '  （⚠️ 跑的是 M1 版 html）' : ''));
 if(fail){

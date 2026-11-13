@@ -57,6 +57,10 @@ export function createRoomCore(storage, opts){
     /* ★ 续期截止（.status 要显示"已续期至 X"）：取库里最大的 keep_until。
      *   它代表"房间里最晚到期那批" —— 用户看这一行就知道下次该什么时候再导出。 */
     const keepUntil = await storage.maxKeepUntil();
+    /* ★ P3：上次归零还原时刻（G·8.4 ②）。由 RESET_SQL 写在 room 行，
+     *   只由 getRoom() 读出、在这里用 ymdOf 统一 UTC+8 日期串 —— 与 keepUntil 同一条时钟链，
+     *   引擎侧不再自己解析 epoch（客户端时间不可信，引擎也可能跑在浏览器侧）。 */
+    const lastResetAt = room.lastResetAt ?? null;
     let seq = room.seq || 0;
     return {
       room: {
@@ -68,6 +72,7 @@ export function createRoomCore(storage, opts){
         online: onlineOf ? onlineOf() : null,      // 当前在线（ws 连接数）；null = 未知（纯逻辑测不到）
         members: memberCountOf ? memberCountOf() : null,  // 累计接入人次
         keepUntil: keepUntil ? ymdOf(keepUntil) : null,
+        lastResetAt: lastResetAt ? ymdOf(lastResetAt) : null,
         /* ★ 引擎里所有"现在几点"一律用**服务端时钟**（本项目铁律：客户端时间不可信，
          *   而引擎既跑在 Worker 也可能跑在浏览器侧 —— 不注入就会出现两个时钟）。
          *   注入后 .set rule 落库的时间串与消息 ts 保证同源；不注入时退回 Date.now()。 */
