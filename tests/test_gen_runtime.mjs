@@ -63,7 +63,7 @@ console.log('== A2·1 动词注册 / 冲突 / 与规则域并存 ==');
   eq('★ 裸 .coc 命中', (() => { const q = Engine.parseCommand('.coc'); return q && q.verb; })(), 'coc');
   eq('★ 无中文别名（.生成 不命中、降级聊天）', Engine.parseCommand('.生成 属性'), null);
   eq('★ 未命中动词仍降级为聊天', Engine.parseCommand('.xyz'), null);
-  eq('★ VERBS 集合 17→19', Engine.VERBS.size, 19);
+  eq('★ VERBS 集合 17→19→20（C1 加 sc；C2 加 ds 后 21）', Engine.VERBS.size, 20);
   ok('★ VERBS 含 coc / dnd', Engine.VERBS.has('coc') && Engine.VERBS.has('dnd'));
   eq('★ 别名域零冲突', Engine.ALIAS.conflicts.length, 0);
   eq('★ verb 域 coc / dnd 已注册',

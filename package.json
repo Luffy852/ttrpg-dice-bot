@@ -4,9 +4,10 @@
   "private": true,
   "description": "在线多房间骰娘：Cloudflare Worker + Durable Object + WebSocket，服务端权威掷骰",
   "scripts": {
-    "test": "node tests/test_engine.js && node tests/test_engine_esm.mjs && node tests/test_protocol.mjs && node tests/test_schema.mjs && node tests/test_worker.mjs && node tests/test_export_filter.mjs && node tests/dom_smoke.js && node tests/test_payload_roundtrip.mjs && node tests/test_initiative.mjs && node tests/test_sqlite_storage.mjs && node tests/test_gen_attrs.mjs && node tests/test_gen_runtime.mjs",
+    "test": "node tests/test_engine.js && node tests/test_engine_esm.mjs && node tests/test_protocol.mjs && node tests/test_schema.mjs && node tests/test_worker.mjs && node tests/test_export_filter.mjs && node tests/dom_smoke.js && node tests/test_payload_roundtrip.mjs && node tests/test_initiative.mjs && node tests/test_sqlite_storage.mjs && node tests/test_gen_attrs.mjs && node tests/test_gen_runtime.mjs && node tests/test_sc.mjs",
     "test:gen": "node tests/test_gen_attrs.mjs",
     "test:gen-runtime": "node tests/test_gen_runtime.mjs",
+    "test:sc": "node tests/test_sc.mjs",
     "test:export": "node tests/test_export_filter.mjs",
     "test:engine": "node tests/test_engine.js",
     "test:engine:esm": "node tests/test_engine_esm.mjs",

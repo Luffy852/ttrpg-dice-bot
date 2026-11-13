@@ -318,8 +318,8 @@ console.log('== 验收 13 · 别名词表与边角 ==');
   eq('normToken(战斗 结束) === normToken(战斗结束)', Engine.normToken('战斗 结束'), Engine.normToken('战斗结束'));
   ok('normToken(结束) ≠ normToken(战斗结束)', Engine.normToken('结束') !== Engine.normToken('战斗结束'));
   eq('mode 域与 verb 域分域独立', Engine.lookupAlias('mode', '优势').key, 'adv');
-  /* 模块 C 的 .理智 尚未注册（按消费状态表留到模块 C），.rc 理智 不受影响 */
-  eq('.理智 当前不是动词（模块 C 排期）', Engine.parseCommand('.理智'), null);
+  /* 模块 C · C1 已注册 `.理智`→sc（I·4.1）；`.rc 理智` 仍走参数域，不受影响 */
+  eq('.理智 → sc（模块 C C1 已注册）', (Engine.parseCommand('.理智') || {}).verb, 'sc');
   eq('.rc 理智 仍走 rc 动词、不受动词域影响', Engine.parseCommand('.rc 理智').verb, 'rc');
 }
 

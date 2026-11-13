@@ -129,7 +129,9 @@ const COC_PACK = {
       return {title:'📜 你卡上的属性与技能（COC 7th）', sections:secs, foot:[
         attrs.length ? '' : '⚠️ 卡上还没有<b>属性</b> —— 补 <b>.st set 力量 60 体质 50 体型 60 敏捷 55</b> 后，骰娘会给一条可复制的 .st 指令把初始派生值录入',
         '技能表是开放的：想加就 <b>.st set 开锁 30</b>，不用管表里有没有',
-        '未绑的技能不能直接掷 —— 先 <b>.st set 名字 数值</b>，或 <b>.r 1d100</b> 裸掷'
+        '未绑的技能不能直接掷 —— 先 <b>.st set 名字 数值</b>，或 <b>.r 1d100</b> 裸掷',
+        /* ★ S2 模块 C · C1（I·4.1）：两条返回路径都要带这一句，不能只加一处 */
+        '.sc / .理智 相当于 .rc 理智（自动取卡上 SAN）'
       ].filter(Boolean)};
     }
     return {title:'📜 COC 检定 · 本规则怎么用', sections:[
@@ -145,7 +147,9 @@ const COC_PACK = {
     ], foot:[
       '★ COC 的技能表是开放列表 —— 上面只是参考，你写什么名字都能进卡',
       'ℹ️ 7 版<b>没有"灵感"这一属性</b>：灵感检定 = 智力检定（掷骰 ≤ 智力值）',
-      'ℹ️ 检定是 1d100 ≤ 数值；奖惩骰写法 <b>.rc 侦查 +1</b> / <b>.rc 侦查 -2</b>'
+      'ℹ️ 检定是 1d100 ≤ 数值；奖惩骰写法 <b>.rc 侦查 +1</b> / <b>.rc 侦查 -2</b>',
+      /* ★ S2 模块 C · C1（I·4.1）：有卡 / 无卡两条返回路径都要带这一句 */
+      '.sc / .理智 相当于 .rc 理智（自动取卡上 SAN）'
     ]};
   },
   runCheck({args, mode, card, ruleKey}){
@@ -193,6 +197,26 @@ const COC_PACK = {
     return {view:{ruleKey, mode:null, groups, comps:[], diceSum:t.diceSum, add:t.add, total:t.total,
       title:hit.zh + '检定（' + skill + '）' + tag,
       dc:skill, dcLabel:'技能值', verdict, natBadge:null, natNote:verdict.why || null, notes}};
+  },
+  /* ★ S2 模块 C · C1（I·4.1）：`.sc` / `.理智` = 固定 `.rc 理智` ＋ 透传奖惩参数。
+   *   只在本包登记（packs.js 的 verbOwner 单一源）；判定逻辑仍只有 runCheck 一份，
+   *   零新掷骰逻辑、零协议 / Worker / schema / 前端改动。非 COC 规则下 cmd.js 的
+   *   owner 兜底给归属提示，不静默、不降级为聊天（Q2）。 */
+  verbs: {
+    sc(rest, {card, ruleKey, me}){
+      // 与 .rc 分支同款「需要卡且卡的族必须匹配」检查；缺卡 / 换族卡不自动推导、不写卡
+      if(!card || card.family !== COC_PACK.family) return {notice: COC_PACK.noCardNote(card)};
+      const extra = String(rest || '').trim().split(/\s+/).filter(Boolean);
+      /* ★ Q3：奖惩参数原样透传，但「多给的技能名」必须显式报错、不静默换检定目标。
+       *   技能名判定复用别名层（check:coc7 域）单一源，不复制 runCheck 的参数解析。 */
+      const other = extra.find(t => lookupAlias(checkDomainOf(ruleKey), t));
+      if(other){
+        return {notice:'「<b>.sc / .理智</b>」只按卡上的 SAN 检定，不能改成别的技能 —— ' +
+          '要检定「' + esc(other) + '」请用 <b>.rc ' + esc(other) + '</b>；' +
+          '奖惩骰直接写在后面，如 <b>.sc +1</b> / <b>.sc -2</b>'};
+      }
+      return COC_PACK.runCheck({args:('理智 ' + (rest || '').trim()).trim(), mode:null, card, ruleKey, me});
+    }
   },
   // ★ M3：payload 只存事实，判定结论现场推导 —— 这里是「从骰点事实还原结论」的唯一入口。
   //   与 runCheck 共用同一个 judgeCoc，判定逻辑仍然只有一份。
