@@ -12,17 +12,41 @@ import { rollGroups } from './roll.js';
 import { esc, fmtMod } from './util.js';
 import { buildTotal, judgeDnd, natMarkOf, natOf, sumKept } from './view.js';
 
+/* ★ S2 模块 C · C2（I·4.2）：死亡豁免固定提示的唯一来源（DND_PACK.verbs.ds 使用）。
+ *   档案原文含「< 10 记一次失败」—— render.js 的 notes 不 esc，ASCII「<」会被浏览器
+ *   当未知标签吞掉（A3 / #58 同型），故等价改写为「低于 10」，语义不变、Markdown 战报也不露实体。 */
+const DS_NOTE = '≥ 10 记一次成功　·　低于 10 记一次失败　·　自然 1 计两次失败　·　自然 20 可回复 1 HP';
+
 const DND_PACK = {
   family:'dnd',
   supportsCheck:true,
   needsCard:true,
-  /* ★ S2 模块 B（I·3.1）：可选字段 —— 不是 pack-contract.js 的必选契约字段，
+  /* ★ S2 模块 B（I·3.1）＋ 模块 C · C2：可选字段 —— 不是 pack-contract.js 的必选契约字段，
    *   其余 4 个规则包一律不写，T6a 契约断言与 5 个包零增补。
-   *   verbs 里的值是**声明**（状态型动词，要写 DO 的 combat* 表），不是执行函数；
-   *   引擎 cmd.js 只对函数型专属动词执行，Worker 侧用 initiative 查表放行。 */
+   *   两类值：ri / init 是**状态型声明**（要写 DO 的 combat* 表，Worker 侧 initiative 放行）；
+   *   ds 是**计算型函数**（引擎内闭环，复用本文件已 import 的掷骰链，零新增 import）。 */
   verbs: {
     ri:   {kind:'state', worker:'initiative'},
-    init: {kind:'state', worker:'initiative'}
+    init: {kind:'state', worker:'initiative'},
+    /* ★ S2 模块 C · C2（I·4.2）：`.ds` / `.死亡豁免` / `.死豁` = 带规则文字提示的 D20 检定。
+     *   实质 .r 1d20 + 固定提示；不记数 / 不改 HP / 不判 3 次结果 / 不做 .ds stat。
+     *   notes 走 render.js 的「不 esc」通道，故 DS_NOTE 避开 ASCII「<」（#58 同型）。 */
+    ds(rest, {ruleKey}){
+      if(rest){
+        return {notice:'「<b>.ds</b>」不接受参数 —— 死亡豁免只掷 1d20 并附规则文字提示；' +
+          '成功 / 失败次数请自行按提示记录（骰娘不记数、不改 HP）。'};
+      }
+      const p = parseExpr('1d20');
+      const groups = rollGroups(p.groups, null, ruleKey);
+      const diceSum = sumKept(groups);
+      const t = buildTotal(diceSum, []);
+      const nat = natOf(groups, diceSum);
+      const nm = natMarkOf(nat, ruleKey);
+      return {view:{ruleKey, mode:null, groups, comps:[], diceSum:t.diceSum, add:t.add, total:t.total,
+        title:'死亡豁免', dc:null, verdict:null,
+        natBadge:(nm && nm.badge) || null, natNote:(nm && nm.note) || null,
+        notes:[DS_NOTE]}};
+    }
   },
   initiative: {
     // 默认公式的基底；敏捷调整值由 Worker 侧从卡读快照后按符号规范化拼上（I·3.4.2）
