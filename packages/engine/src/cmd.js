@@ -11,11 +11,12 @@ import { rollGroups } from './roll.js';
 import { IMPLEMENTED, RULE_META, normalizeRule, ruleFamily, ruleToken } from './rules.js';
 import { esc, hhmm } from './util.js';
 import { buildTotal, natMarkOf, natOf, sumKept } from './view.js';
+import { GEN_SPEC, genAttrs } from './gen_attrs.js';
 
 /* ★ S2 模块 B：ri / init 是「状态型」专属动词 —— 归属在这里登记（清单/切分锚点用），
  *   执行层在 Worker（要写 combat* 表），core.apply 会先分流，生产链路不会走到本文件的
  *   规则专属分支。运行时命中动词靠 card.js 的 verb 域 lookupAlias，不靠这个集合。 */
-const VERBS = new Set(['r','h','help','status','stat','set','rule','name','nn','st','rc','ra','rd','dh','fu','ri','init']);
+const VERBS = new Set(['r','h','help','status','stat','set','rule','name','nn','st','rc','ra','rd','dh','fu','ri','init','coc','dnd']);
 const LIMIT_MSG = '指令规模过大（单次骰数上限 100 / 面数上限 10000 / 合计 500）';
 const SYNTAX_MSG = '暂不支持该语法（括号/乘除/骰池等），可用 .help 查看支持的格式';
 const NO_CARD_MSG = '尚未绑定角色卡，可用 <b>.st set 力量 16 敏捷 14 体质 15 智力 10 感知 12 魅力 8 等级 5</b> 绑定；或直接用 <b>.r 1d20+3</b> 投掷';
@@ -346,6 +347,15 @@ function handleCommand(text, ctx){
     }
     notice('用法：<b>.st</b> 查看　·　<b>.st set ...</b> 绑定　·　<b>.st clear</b> 解绑' +
       (fam ? '　（当前规则 ' + esc(RULE_META[room.rule].name) + '，各规则字段不同，<b>.st</b> 会给出模板）' : ''));
+    return {msgs:out, handled:true};
+  }
+
+  // ---- .coc / .dnd 属性生成（★ S2 模块 A：全局小工具动词，不绑 room.rule；I·2.1）----
+  // 一次 GEN_SPEC[verb] 查表选生成器，主流程不认识 COC / DND 各自的公式与数据；
+  // 非法组数由生成器给 notice，合法结果走现成 defs 结构化说明通道（零协议改动）。
+  if(GEN_SPEC[verb]){
+    const g = genAttrs(verb, rest);
+    if(g.notice) notice(g.notice); else defs(g.defs);
     return {msgs:out, handled:true};
   }
 
