@@ -30,7 +30,15 @@ const DND_PACK = {
     init: {kind:'state', worker:'initiative'},
     /* ★ S2 模块 C · C2（I·4.2）：`.ds` / `.死亡豁免` / `.死豁` = 带规则文字提示的 D20 检定。
      *   实质 .r 1d20 + 固定提示；不记数 / 不改 HP / 不判 3 次结果 / 不做 .ds stat。
-     *   notes 走 render.js 的「不 esc」通道，故 DS_NOTE 避开 ASCII「<」（#58 同型）。 */
+     *   notes 走 render.js 的「不 esc」通道，故 DS_NOTE 避开 ASCII「<」（#58 同型）。
+     * ★ S2-BC-C3 小补丁（真机反馈）：死亡豁免是有明确难度等级 10 的检定。
+     *   C2 的 dc:null 让落库回放走 DND_PACK.replayVerdict → judgeDnd(total, null, …)
+     *   返回「ⓘ 未指定难度」（与 .r 1d20 裸投掷同款），与规则文字自相矛盾。
+     *   这里把 dc 定为 10 并复用现成 judgeDnd 给单次结论：
+     *     · factsFromView 把 dc=10 存进 payload（dc 本就在白名单，零协议改动）；
+     *     · viewFromPayload 由 replayVerdict 现场推导出「成功 / 失败」，永久消掉「未指定难度」；
+     *     · 一般投掷 dc=null 的行为完全不变（公共层 view.js / replay.js 一行未动）。
+     *   结论徽章只是单次判定，不累计次数、不改 HP —— I·1 第 15 条边界不破。 */
     ds(rest, {ruleKey}){
       if(rest){
         return {notice:'「<b>.ds</b>」不接受参数 —— 死亡豁免只掷 1d20 并附规则文字提示；' +
@@ -43,7 +51,7 @@ const DND_PACK = {
       const nat = natOf(groups, diceSum);
       const nm = natMarkOf(nat, ruleKey);
       return {view:{ruleKey, mode:null, groups, comps:[], diceSum:t.diceSum, add:t.add, total:t.total,
-        title:'死亡豁免', dc:null, verdict:null,
+        title:'死亡豁免', dc:10, dcLabel:'DC', verdict:judgeDnd(t.total, 10, nat, ruleKey),
         natBadge:(nm && nm.badge) || null, natNote:(nm && nm.note) || null,
         notes:[DS_NOTE]}};
     }

@@ -4,6 +4,9 @@
  * 范围：`.ds` / `.死亡豁免` / `.死豁` 全套（别名注册 + DND 计算型接线 + 归属提示 +
  *       .help dnd 段 + 固定规则文字的渲染后 HTML + 参数边界 + 零扩张 + C1 不回退）。
  * 不含 `.sc`（C1 已交付，本脚本只做向后比对抽样）。
+ * ★ S2-BC-C3 小补丁：死亡豁免固定难度等级 DC 10 —— 消除真机「未指定难度」徽章。
+ *   新增 C-3b「落库回放链路」断言：真机看到的是 viewFromPayload 还原后的消息，
+ *   只查引擎 view 会漏掉根因（replayVerdict 对 dc=null 返回「未指定难度」）。
  *
  * 不抄生产逻辑：所有输出都从真实 Engine.handleCommand / Engine.renderMsg /
  * Engine.renderDefs 取；随机源一律 Engine.RNG.die（固定序列），try/finally 恢复。
@@ -124,7 +127,7 @@ console.log('== C-2 · 规则归属（Q2 对称：不静默、不降级为聊天
   ok('★ 不回归：.sc 在 dnd5e 下不写 .ri / .init', !/\.ri \/ \.init/.test(scHtml));
 }
 
-console.log('== C-3 · 完全等价 .r 1d20 ＋ 固定提示（Q4：避开 ASCII 尖括号） ==');
+console.log('== C-3 · 固定 DC 10 ＋ 固定提示（C3：真机「未指定难度」补丁） ==');
 {
   for(const rule of ['dnd5e','dnd5r']){
     const a = diceAll(1, () => run('.ds', mkCtx(rule, CARD)));
@@ -132,19 +135,25 @@ console.log('== C-3 · 完全等价 .r 1d20 ＋ 固定提示（Q4：避开 ASCII
     const va = viewOf(a), vb = viewOf(b);
     ok('★ ' + rule + ' 下 .ds 产出 roll 消息', kindOf(a) === 'roll', kindOf(a));
     ok('★ ' + rule + ' 下 .r 1d20 仍是 roll（等价参照）', kindOf(b) === 'roll', kindOf(b));
-    /* 等价只取骰点事实：title / notes 是 C2 特有的元信息，单独断言 */
+    /* C3 起 dc / dcLabel / verdict / title / notes 是 .ds 特有元信息；等价只取骰点事实 */
     const fa = va ? {ruleKey:va.ruleKey, mode:va.mode, groups:va.groups, comps:va.comps,
-      diceSum:va.diceSum, add:va.add, total:va.total, dc:va.dc, dcLabel:va.dcLabel,
-      verdict:va.verdict, natBadge:va.natBadge, natNote:va.natNote} : null;
+      diceSum:va.diceSum, add:va.add, total:va.total, natBadge:va.natBadge, natNote:va.natNote} : null;
     const fb = vb ? {ruleKey:vb.ruleKey, mode:vb.mode, groups:vb.groups, comps:vb.comps,
-      diceSum:vb.diceSum, add:vb.add, total:vb.total, dc:vb.dc, dcLabel:vb.dcLabel,
-      verdict:vb.verdict, natBadge:vb.natBadge, natNote:vb.natNote} : null;
-    ok('★ ' + rule + ' 下骰点事实与 .r 1d20 逐字段等价（dc / verdict / nat / groups / total）',
+      diceSum:vb.diceSum, add:vb.add, total:vb.total, natBadge:vb.natBadge, natNote:vb.natNote} : null;
+    ok('★ ' + rule + ' 下骰点事实与 .r 1d20 逐字段等价（groups / total / nat / mode）',
       !!fa && !!fb && JSON.stringify(fa) === JSON.stringify(fb), JSON.stringify(fa).slice(0, 130));
     eq('★ ' + rule + ' 下 title = 死亡豁免', va && va.title, '死亡豁免');
     eq('★ ' + rule + ' 下 .r 1d20 title = 掷骰 1d20（对照）', vb && vb.title, '掷骰 1d20');
-    eq('★ ' + rule + ' 下 dc = null（不设难度）', va && va.dc, null);
-    eq('★ ' + rule + ' 下 verdict = null（不做判定）', va && va.verdict, null);
+    /* ★ C3：死亡豁免是「有明确难度等级 10」的检定，dc 不再是 null */
+    eq('★ ' + rule + ' 下 dc = 10（固定难度等级）', va && va.dc, 10);
+    eq('★ ' + rule + ' 下 dcLabel = DC', va && va.dcLabel, 'DC');
+    ok('★ ' + rule + ' 下 verdict 不再是 null', !!va && !!va.verdict);
+    ok('★ ' + rule + ' 下 verdict.text 不含「未指定难度」',
+      !!va && !!va.verdict && !/未指定难度/.test(String(va.verdict.text)),
+      JSON.stringify(va && va.verdict));
+    eq('★ ' + rule + ' 下骰 1 → verdict.ok = false（1 低于 10）', va && va.verdict && va.verdict.ok, false);
+    ok('★ ' + rule + ' 下骰 1 → verdict.text 含「失败」',
+      !!va && !!va.verdict && /失败/.test(String(va.verdict.text)), JSON.stringify(va && va.verdict));
     eq('★ ' + rule + ' 下 comps 为空（不加调整项）', va && JSON.stringify(va.comps), '[]');
     eq('★ ' + rule + ' 下 mode = null', va && va.mode, null);
     ok('★ ' + rule + ' 下 groups 恰一颗 d20', !!va && va.groups.length === 1 && va.groups[0].sides === 20);
@@ -160,10 +169,22 @@ console.log('== C-3 · 完全等价 .r 1d20 ＋ 固定提示（Q4：避开 ASCII
     ok('★ ' + rule + ' 下 renderRoll 之后 HTML 含完整「低于 10 记一次失败」', html.includes('低于 10 记一次失败'), html.slice(-160));
     ok('★ ' + rule + ' 下 renderRoll 之后 HTML 含「自然 20 可回复 1 HP」', html.includes('自然 20 可回复 1 HP'));
     ok('★ ' + rule + ' 下 renderRoll 之后 HTML 不含「< 10」', !html.includes('< 10'), html.slice(-160));
+    ok('★ ' + rule + ' 下 renderRoll 之后 HTML 不含「未指定难度」', !html.includes('未指定难度'), html.slice(-160));
     ok('★ ' + rule + ' 下 roll payload 过协议白名单（零新字段 / 零新 kind）',
       checkPayload(KIND.ROLL, {title:va && va.title, mode:va && va.mode, groups:va && va.groups,
         comps:va && va.comps, dc:va && va.dc, notes:va && va.notes}) === null);
   }
+  /* ★ DC 10 的语义：≥10 成功 / 低于 10 失败；5.5e 的自然 20 / 1 强制结论不与之冲突 */
+  for(const [rv, expectOk] of [[9,false],[10,true],[15,true]]){
+    const v = viewOf(diceAll(rv, () => run('.ds', mkCtx('dnd5e', CARD))));
+    eq('★ dnd5e 掷 ' + rv + ' → verdict.ok = ' + expectOk, v && v.verdict && v.verdict.ok, expectOk);
+    ok('★ dnd5e 掷 ' + rv + ' → verdict 不含「未指定难度」',
+      !!v && !!v.verdict && !/未指定难度/.test(String(v.verdict.text)), JSON.stringify(v && v.verdict));
+  }
+  const v20 = viewOf(diceAll(20, () => run('.ds', mkCtx('dnd5r', CARD))));
+  eq('★ dnd5r 掷 20 → 大成功（ok=true）', v20 && v20.verdict && v20.verdict.ok, true);
+  const v1 = viewOf(diceAll(1, () => run('.ds', mkCtx('dnd5r', CARD))));
+  eq('★ dnd5r 掷 1 → 大失败（ok=false）', v1 && v1.verdict && v1.verdict.ok, false);
   eq('★ KINDS 仍是 6 种（不新增消息 kind）', KINDS.length, 6);
   const before = JSON.stringify(CARD.data);
   const ctx = mkCtx('dnd5e', CARD);
@@ -174,6 +195,43 @@ console.log('== C-3 · 完全等价 .r 1d20 ＋ 固定提示（Q4：避开 ASCII
     !(r.msgs || []).some(x => x.kind === 'sys' || x.kind === 'notice'));
   /* ★ 战报通道：render-md.js 把 notes 原样写进 Markdown（静态锁，不抄生产逻辑） */
   ok('★ render-md.js 仍把 view.notes 原样写进战报', /v\.notes/.test(strip(read('packages/engine/src/render-md.js'))));
+}
+
+console.log('== C-3b · 落库回放链路（★ 真机「未指定难度」的根因，必须追到 replay） ==');
+{
+  for(const rule of ['dnd5e','dnd5r']){
+    const v = viewOf(diceAll(15, () => run('.ds', mkCtx(rule, CARD))));
+    const payload = Engine.factsFromView(v);
+    eq('★ ' + rule + ' 下 payload.dc = 10', payload.dc, 10);
+    eq('★ ' + rule + ' 下 payload 不含 verdict（派生值不存副本）', payload.verdict, undefined);
+    eq('★ ' + rule + ' 下 payload 过 ROLL 白名单', checkPayload(KIND.ROLL, payload), null);
+    const back = Engine.viewFromPayload(payload);
+    eq('★ ' + rule + ' 下回放 dc = 10', back.dc, 10);
+    ok('★ ★ ' + rule + ' 下回放 verdict 不含「未指定难度」（真机补丁生效）',
+      !!(back.verdict && !/未指定难度/.test(String(back.verdict.text))), JSON.stringify(back.verdict));
+    eq('★ ' + rule + ' 下回放 verdict.ok = true（15 ≥ 10）', back.verdict && back.verdict.ok, true);
+    const html = String(Engine.renderMsg({id:1, ts:new Date(), kind:'roll', from:'骰娘', actor:'老王', view:back}) || '');
+    ok('★ ' + rule + ' 下回放后 renderRoll HTML 不含「未指定难度」', !html.includes('未指定难度'), html.slice(-160));
+    ok('★ ' + rule + ' 下回放后 HTML 仍含完整固定提示', html.includes('低于 10 记一次失败'));
+  }
+  /* ★ 方案 A（改公共判定层）被否决：一般投掷的「未指定难度」原样保留。
+   *   骰值取 15 —— 避开 5.5e 的 nat 1 / 20 强制结论分支（那是既有行为，与 dc 无关）。 */
+  for(const rule of ['dnd5e','dnd5r']){
+    const v = viewOf(diceAll(15, () => run('.r 1d20', mkCtx(rule, CARD))));
+    const back = Engine.viewFromPayload(Engine.factsFromView(v));
+    ok('★ 不回归：' + rule + ' 下 .r 1d20 回放仍给「未指定难度」',
+      !!back.verdict && /未指定难度/.test(String(back.verdict.text)), JSON.stringify(back.verdict));
+  }
+  /* ★ 负向先行：C2 旧状态（dc=null）回放确实给「未指定难度」——证明补丁断言不是摆设（#31） */
+  const legacy = Engine.viewFromPayload({title:'死亡豁免', rule_at:'dnd5e', mode:null, dc:null,
+    groups:[{n:1,sides:20,sign:1,tries:[[15]],kept:[15],keptIdx:0}], comps:[], notes:[]});
+  ok('★ 负向：C2 旧 payload（dc=null）回放确实给「未指定难度」（防摆设断言）',
+    !!legacy.verdict && /未指定难度/.test(String(legacy.verdict.text)), JSON.stringify(legacy.verdict));
+  /* ★ 公共层一行未动（C3 只改规则包 view 字段） */
+  ok('★ view.js 仍是 judgeDnd 对 dc=null 返回「未指定难度」（方案 A 未实施）',
+    /if\(dc == null\) return \{ok:null, text:'未指定难度'\}/.test(strip(read('packages/engine/src/view.js'))));
+  ok('★ replay.js 仍按 p.dc 调 pack.replayVerdict（公共链路未改）',
+    /pack\.replayVerdict/.test(strip(read('packages/engine/src/replay.js'))));
 }
 
 console.log('== C-4 · 参数边界（I·1 第 15 条：不做 .ds stat / 不静默忽略） ==');
@@ -195,7 +253,8 @@ console.log('== C-5 · .help dnd 段（Q4 对称补齐 / #58 呈现） ==');
     const h = htmlOf(r);       // = renderDefs(defs) 之后的 HTML
     ok('★ .help ' + key + ' 追加「死亡豁免」段', h.includes(DS_HINT));
     for(const s of ['.ds / .死亡豁免 / .死豁','固定提示','只给提示、不改状态','不接参数',
-                    '可用性','.set rule dnd','1d20','≥ 10 记一次成功','低于 10 记一次失败']){
+                    '可用性','.set rule dnd','1d20','≥ 10 记一次成功','低于 10 记一次失败',
+                    '固定 DC 10']){
       ok('★ .help ' + key + ' 呈现后 HTML 含「' + s + '」', h.includes(s));
     }
     ok('★ .help ' + key + ' 不含 ASCII「< 10」/「<N>」吞字字面', !/< 10/.test(h) && !/<N>/.test(h));
@@ -248,6 +307,10 @@ console.log('== C-6 · 零协议 / 零 Worker / 零 schema / 零前端（I·1 / 
   ok('★ cmd.js 未新增 ds 专属分支（沿用 verbOwner → pack.verbs[verb] 单一路径）',
     !/verb\s*===\s*'ds'/.test(cmd));
   ok('★ VERBS 只多出 ds 一个动词（21 = C1 的 20 + 1）', Engine.VERBS.size === 21 && Engine.VERBS.has('ds'));
+  ok('★ pack_dnd.js 的 verbs.ds 写出 dc:10（C3 落点，单点改动）',
+    /title:'死亡豁免', dc:10, dcLabel:'DC', verdict:judgeDnd/.test(dnd));
+  ok('★ view.js 公共判定层未被改动（方案 A 未实施）',
+    /if\(dc == null\) return \{ok:null, text:'未指定难度'\}/.test(strip(read('packages/engine/src/view.js'))));
   ok('★ view 无成功 / 失败计数字段（不记数、不改 HP）', (() => {
     const v = viewOf(diceAll(1, () => run('.ds', mkCtx('dnd5e', CARD)))) || {};
     return !('success' in v) && !('fail' in v) && !('hp' in v);
@@ -277,5 +340,5 @@ console.log('== C-7 · 既有模块未被 C2 回退（向后比对） ==');
 }
 
 console.log('---------------------------');
-console.log('模块 C · C2 验收：通过 ' + pass + ' 项，失败 ' + fail + ' 项');
+console.log('模块 C · C2 验收（含 C3 固定 DC 10 补丁）：通过 ' + pass + ' 项，失败 ' + fail + ' 项');
 process.exit(fail ? 1 : 0);
