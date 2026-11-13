@@ -377,6 +377,47 @@ console.log('== 12. ★★ .h 必须能查到刚掷的骰（线上事故 · 房�
     bNotice && bNotice.payload.html);
 }
 
+
+console.log('== 13. ★ P3 .status「本房间已于 X 重置」真实链路（G·8.4 ②）==');
+/* 【为什么单列一节】字段要穿 3 层：storage.getRoom() → core.buildCtx() → 引擎 rows。
+ *   只测引擎等于绕过前两层；上一轮 #31/#42 的教训正是「看起来对的数字要追到真实写入」。
+ *   这里走 createRoomCore.apply()，并用 UTC+8 的 epoch 真验日期，不手抄 ymd 结果。 */
+{
+  let t = 1772000000000;
+  const st = createMemoryStorage('246810');
+  const core = createRoomCore(st, {now: () => (t += 1000)});
+  const statusOf = async (id, anonId, nick) => {
+    const r = await core.apply({reqId:id, text:'.status', anonId, nick});
+    return r.msgs.find(m => m.kind === 'html');
+  };
+  /* ★ .status 走 page() → defs:{raw:html}；落库后 payload.defs.raw 才是渲染产物，
+     查 payload.defs.rows 会永远 undefined（真跑复现过）。 */
+  const rawOf = m => (m && m.payload && m.payload.defs && m.payload.defs.raw) || '';
+  const r0 = await core.apply({reqId:'p3-q0', text:'.status', anonId:'a1', nick:'老王'});
+  const before = r0.msgs.find(m => m.kind === 'html');
+  ok('★ P3 从未重置的房间 .status 不含「重置记录」',
+    !!before && !/重置记录/.test(rawOf(before)), rawOf(before).slice(-160));
+
+  /* 模拟归零还原刚写过 last_reset_at：写回房间字段，不落任何消息（G·8.4 ② 零消息） */
+  const EPOCH = 1772000000000;
+  await st.setRoom({lastResetAt:EPOCH});
+  const r1 = await core.apply({reqId:'p3-q1', text:'.status', anonId:'a1', nick:'老王'});
+  const after = r1.msgs.find(m => m.kind === 'html');
+  const raw = rawOf(after);
+  ok('★ P3 有 last_reset_at 时 .status 出现该行', /重置记录/.test(raw), raw.slice(-200));
+  const want = Engine.ymd(EPOCH);       // UTC+8 的 ymd，与 .status「已续期至」同一条时钟链
+  ok('★ P3 日期走 UTC+8 的 ymd（不是 toISOString 的 UTC）',
+    /本房间已于 \d{4}-\d{2}-\d{2} 重置/.test(raw) && raw.indexOf('本房间已于 ' + want + ' 重置') >= 0,
+    'got=' + (raw.match(/本房间已于 [^<]*/) || [''])[0] + ' want=' + want);
+  ok('★ P3 该行不新增消息 / 不占额外 seq（与无重置记录时条数相同）',
+    r1.msgs.length === r0.msgs.length, 'before=' + r0.msgs.length + ' after=' + r1.msgs.length);
+  const all = await st.since(0, 100);
+  ok('★ P3 重置记录读房间字段、不是聊天消息（无 sys/notice「房间已重置」气泡）',
+    !all.some(m => (m.kind === 'sys' || m.kind === 'notice') &&
+      /房间已重置|本房间已于/.test(JSON.stringify(m.payload || {}))),
+    JSON.stringify(all.filter(m => m.kind === 'sys' || m.kind === 'notice').map(m => m.kind)));
+}
+
 console.log('---------------------------');
 console.log('Worker 纯逻辑：通过 ' + pass + ' 项，失败 ' + fail + ' 项');
 console.log('⚠️  未验（只能你部署后验）：room.js 的 DO 行为 / index.js 路由 / wrangler 配置 / 真实 ws');

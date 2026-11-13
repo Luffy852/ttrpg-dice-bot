@@ -213,7 +213,15 @@ function handleCommand(text, ctx){
       /* ★ 写"最早一条将在 N 天后清理"而不是只有一句"30 天"：
        *   续期生效后这个日期会往后推，用户看得见它动了 —— 否则没法验证续期是否工作。 */
       {k:'消息留存',   v:'30 天 · 本房间共 ' + cnt + ' 条' +
-        (room.keepUntil ? ('　｜　已续期至 ' + room.keepUntil) : '')}
+        (room.keepUntil ? ('　｜　已续期至 ' + room.keepUntil) : '')},
+      /* ★ P3 · G·8.4 ②：「之后进来的人拿到空房间，meta / .status 里能看到
+       *   『本房间已于 X 重置』—— 读的是房间字段，不是聊天消息」。
+       *   lastResetAt 由 core.buildCtx 注入（已格式化成 UTC+8 日期串）；
+       *   null / undefined 整行不渲染，避免「本房间已于 重置」这种空话，
+       *   也让 Engine.makeRoom() 的纯引擎测试照旧安全（不扩大字段链）。 */
+      ...(room.lastResetAt
+        ? [{k:'重置记录', v:'本房间已于 ' + esc(room.lastResetAt) + ' 重置'}]
+        : [])
     ]}) + '<div class="hs"><div class="hh">我的角色卡' + (ctx.card ? ' · ' + esc(cardRuleName(ctx.card)) : '') + '</div>' +
       cardHtml + (warn ? '<div class="hf">' + warn + '</div>' : '') + '</div>');
     return {msgs:out, handled:true};

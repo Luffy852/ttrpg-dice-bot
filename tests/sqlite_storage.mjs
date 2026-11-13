@@ -50,9 +50,12 @@ export function createSqliteStorage(db, code){
     },
     async getRoom(){
       const r = one('SELECT * FROM room WHERE id = 1');
+      /* ★ P3：与 room.js 的 getRoom() 同形（真库基准，不依赖替身补字段）。 */
       return r ? {code:r.code, rule:r.rule, baredice:!!r.baredice, ruleSetBy:r.rule_set_by,
-                  ruleSetAt:r.rule_set_at, seq:r.seq, created_at:r.created_at}
-               : {code, rule:'generic', baredice:false, ruleSetBy:null, ruleSetAt:null, seq:0, created_at:Date.now()};
+                  ruleSetAt:r.rule_set_at, seq:r.seq, created_at:r.created_at,
+                  lastResetAt:r.last_reset_at ?? null}
+               : {code, rule:'generic', baredice:false, ruleSetBy:null, ruleSetAt:null,
+                  seq:0, created_at:Date.now(), lastResetAt:null};
     },
     async setRoom(p){
       run('UPDATE room SET rule = ?, baredice = ?, rule_set_by = ?, rule_set_at = ? WHERE id = 1',

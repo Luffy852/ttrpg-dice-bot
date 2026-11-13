@@ -195,10 +195,14 @@ export class RoomDO extends DurableObject {
       async getRoom(){
         const r = one('SELECT * FROM room WHERE id = 1');
         // ★ 未 /init 的空房间也返回可用默认值：core.buildCtx 不该为"表还没行"而崩
+        /* ★ P3：G·8.4 ② 「.status 里能看到本房间已于 X 重置」读的是房间字段，
+         *   不是聊天消息。last_reset_at 由 RESET_SQL 写入；NULL = 从未重置过。
+         *   两条分支都给 lastResetAt，空房间不返回 undefined（坑 #42：三份实现一致漏字段）。 */
         return r ? {code:r.code, rule:r.rule, baredice:!!r.baredice, ruleSetBy:r.rule_set_by,
-                    ruleSetAt:r.rule_set_at, seq:r.seq, created_at:r.created_at}
+                    ruleSetAt:r.rule_set_at, seq:r.seq, created_at:r.created_at,
+                    lastResetAt:r.last_reset_at ?? null}
                  : {code:this.code, rule:'generic', baredice:false, ruleSetBy:null, ruleSetAt:null,
-                    seq:0, created_at:Date.now()};
+                    seq:0, created_at:Date.now(), lastResetAt:null};
       },
       async setRoom(p){
         // 只写 core 会改的四个字段（diff，不整存 —— 少一次全行覆盖就少一处并发覆盖风险）
