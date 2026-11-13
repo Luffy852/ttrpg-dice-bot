@@ -12,6 +12,7 @@
  *   ★ 辅助表（members / pcs / combat / combat_entry）**不参与计时**，只在归零那一次清。
  *   ★ reset_at = max(计时主体每条的到期时刻)，**只由用户动作刷新，alarm 绝不写**。
  *   ★ 归零 = 某次滚动 DELETE 后计时主体「由非空变空」，同一次 alarm 里静默还原。
+ *   ★ last_reset_at 由 RESET_SQL 用库时间写入（零参数单一源），io.reset() 不穿过 now。
  * ========================================================================== */
 import {OUT} from '../../../packages/protocol/src/frames.js';
 
@@ -56,7 +57,8 @@ export const RESET_SQL = [
   'DELETE FROM pcs',
   'DELETE FROM members',
   `UPDATE room SET rule = 'generic', baredice = 0, rule_set_by = NULL, rule_set_at = NULL, ` +
-    `notified_clean = 0, reset_at = NULL, warned_for_reset_at = NULL WHERE id = 1`,
+    `notified_clean = 0, reset_at = NULL, warned_for_reset_at = NULL, ` +
+    `last_reset_at = CAST(strftime('%s','now') AS INTEGER) * 1000 WHERE id = 1`,
 ];
 
 /* ---------- 纯决策 ---------- */
@@ -87,16 +89,19 @@ export function nextAlarmAt({now, online, nextExpiry, resetAt, hasContent}){
 
 /* ---------- 瞬时帧（不落库、不占 seq、不续活；G·8.4 ② / C3） ---------- */
 /** 提前 7 天提醒：复用 STATE 帧带锚点字段，不新增帧类型 / 不新增消息 kind（E1 / E2 / I·3.9-15）。
- *  前端当前只读 rule / baredice（顶栏），reset_at / warn_text 供下一步横幅呈现读取。 */
+ *  P2 起前端 setRoom 读 reset_at / warn / warn_text / last_reset_at / server_now 呈现横幅。 */
 export const warnFrame = room => ({
   t:OUT.STATE,
   room:{rule:room.rule || 'generic', baredice:!!room.baredice,
     reset_at:room.reset_at ?? null, warn:true, warn_text:WARN_TEXT},
 });
 /** 重置那一刻：RELOAD 清列表 + STATE 刷回默认顶栏 + PRESENCE 人数归零（全是旧帧） */
-export const resetFrames = ({code, online}) => [
+export const resetFrames = ({code, online, lastResetAt}) => [
   {t:OUT.RELOAD, code, reset:true},
-  {t:OUT.STATE, room:{rule:'generic', baredice:false, reset_at:null}},
+  /* ★ P2：带 last_reset_at / server_now，在线的人也能看到「本房间已于 X 重置」；
+     横幅消失（warn:false + reset_at:null），全程瞬时帧、零落库消息。 */
+  {t:OUT.STATE, room:{rule:'generic', baredice:false, reset_at:null,
+    last_reset_at:lastResetAt ?? null, warn:false, server_now:Date.now()}},
   {t:OUT.PRESENCE, members:[], online:Number(online) || 0, total:0},
 ];
 

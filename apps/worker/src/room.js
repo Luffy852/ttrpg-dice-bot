@@ -46,7 +46,7 @@ export const TABLES = [
      last_active INTEGER NOT NULL, rule TEXT NOT NULL DEFAULT 'generic', baredice INTEGER NOT NULL DEFAULT 0,
      rule_set_by TEXT, rule_set_at INTEGER, pin_hmac TEXT, pin_salt TEXT,
      seq INTEGER NOT NULL DEFAULT 0, notified_clean INTEGER NOT NULL DEFAULT 0,
-     reset_at INTEGER, warned_for_reset_at INTEGER, ver INTEGER NOT NULL DEFAULT 1)`,
+     reset_at INTEGER, warned_for_reset_at INTEGER, last_reset_at INTEGER, ver INTEGER NOT NULL DEFAULT 1)`,
   /* ★ cid = 客户端长期身份键（2026-10-31 真机反馈 · B 组）
    *   以前每次 /join 都现发一个随机 anon_id —— 关页重进就是"另一个人"，
    *   角色卡、昵称全部丢失。现在客户端在浏览器本地存一个 cid（见 apps/web/src/main.js），
@@ -153,6 +153,8 @@ export class RoomDO extends DurableObject {
      *   ★ 只在补列，不在这里排闹钟（L6：构造函数不许无条件 setAlarm）。 */
     try{ this.sql.exec('ALTER TABLE room ADD COLUMN reset_at INTEGER'); }catch(e){ /* 列已存在 */ }
     try{ this.sql.exec('ALTER TABLE room ADD COLUMN warned_for_reset_at INTEGER'); }catch(e){ /* 列已存在 */ }
+    /* ★ P2：上次归零时刻。旧房间补成 NULL —— 语义正好是「从未重置过」，不凭空给老房间写历史。 */
+    try{ this.sql.exec('ALTER TABLE room ADD COLUMN last_reset_at INTEGER'); }catch(e){ /* 列已存在 */ }
     /* ★ 逐条建且不让它炸：索引只是加速，缺了最多变慢；而构造函数抛异常 =
      *   这个房间**彻底打不开**（HTTP 500 + ws 1006，009950 就是这样挂的）。
      *   顺序（ALTER 之后）已经保证了正常路径，这里是最后一道保险。 */
@@ -425,14 +427,14 @@ export class RoomDO extends DurableObject {
     }
 
     if(url.pathname === '/meta'){
-      const room = this.sql.exec('SELECT rule, baredice, created_at, seq, pin_hmac, reset_at FROM room WHERE id = 1').toArray()[0];
+      const room = this.sql.exec('SELECT rule, baredice, created_at, seq, pin_hmac, reset_at, last_reset_at FROM room WHERE id = 1').toArray()[0];
       const members = this.sql.exec('SELECT anon_id, nick FROM members ORDER BY joined_at').toArray();
       if(!room) return Response.json({error:'no_room'}, {status:404});
       /* ★ reset_at 是房间字段、不是聊天消息：后续「本房间内容将重置」横幅读它（G·8.4 ①）。
        *   纯读 /meta 不刷新锚点、不续活（口径 9）。 */
       return Response.json({code:this.code, rule:room.rule, baredice:!!room.baredice,
         has_pin:!!room.pin_hmac, members, msg_seq:room.seq, created_at:room.created_at,
-        reset_at:room.reset_at ?? null});
+        reset_at:room.reset_at ?? null, last_reset_at:room.last_reset_at ?? null, server_now:Date.now()});
     }
 
     if(url.pathname === '/history'){
@@ -628,13 +630,14 @@ export class RoomDO extends DurableObject {
       const room = await this.storage().getRoom();
       const me = this.sql.exec('SELECT nick FROM members WHERE anon_id = ?', anonId).toArray()[0] || {};
       const mem = this.members();
-      const anchor = this.sql.exec('SELECT reset_at FROM room WHERE id = 1').toArray()[0] || {};
+      const anchor = this.sql.exec('SELECT reset_at, last_reset_at FROM room WHERE id = 1').toArray()[0] || {};
       /* ★ 库里的 nick 优先于客户端自报的：客户端自报可能是默认"玩家"，
        *   而库里才是这个身份真正的昵称（与 .status / 成员列表同源）。
        *   reset_at 是房间字段（非聊天消息）：进房/刷新时横幅读它（G·8.4 ①），前端 setRoom 忽略未知字段。 */
       this.send(ws, {t:OUT.WELCOME, you:{anon_id:anonId, nick:me.nick || f.nick || '玩家'},
         room:{rule:room.rule, baredice:!!room.baredice, seq:room.seq, msg_count:await this.storage().countMsgs(),
-          reset_at:anchor.reset_at ?? null},
+          reset_at:anchor.reset_at ?? null, last_reset_at:anchor.last_reset_at ?? null,
+          server_now:Date.now()},
         server_time:Date.now(), members:mem,
         online:this.onlineCount(), total:mem.length});
       /* ★ 首屏 vs 补齐（真机反馈 · C 组）
@@ -769,7 +772,10 @@ export class RoomDO extends DurableObject {
      ★ 不排下一轮闹钟、不写 last_active（L3 / 口径 8）。函数名含 reset —— C2 / C3 / ⑧ 守卫盯这段。 */
   async resetRoom(){
     RESET_SQL.forEach(s => this.sql.exec(s));      // ★ 顺序先 combat_entry 后 combat（C2）
-    resetFrames({code:this.code, online:this.onlineCount()}).forEach(f => this.broadcast(f));
+    /* ★ P2：从库里读刚写入的 last_reset_at，再交给瞬时帧 —— 时间只有 RESET_SQL 一个出处。 */
+    const r = this.sql.exec('SELECT last_reset_at FROM room WHERE id = 1').toArray()[0] || {};
+    resetFrames({code:this.code, online:this.onlineCount(), lastResetAt:r.last_reset_at ?? null})
+      .forEach(f => this.broadcast(f));
     return true;
   }
 
@@ -802,6 +808,17 @@ export class RoomDO extends DurableObject {
     const r = this.sql.exec(SQL_MAX_EXPIRY).toArray()[0];
     this.sql.exec('UPDATE room SET reset_at = ? WHERE id = 1', (r && r.e != null) ? r.e : null);
     await this.armFromUserAction();
+    /* ★ P2：锚点后推后用瞬时帧告诉在线的人「横幅该消失 / 后推了」（G·8.4 ①）。
+       不落库、不占 seq、不续活；与提醒帧同为 STATE，前端只按字段重算。 */
+    this.broadcastRoomState();
+  }
+
+  /** ★ P2：STATE 瞬时帧的房间状态单一出口（refreshAnchor / 提醒共用字段集合）。 */
+  broadcastRoomState(extra){
+    const r = this.sql.exec('SELECT rule, baredice, reset_at, last_reset_at FROM room WHERE id = 1').toArray()[0] || {};
+    this.broadcast({t:OUT.STATE, room:{rule:r.rule || 'generic', baredice:!!r.baredice,
+      reset_at:r.reset_at ?? null, last_reset_at:r.last_reset_at ?? null,
+      warn:false, server_now:Date.now(), ...(extra || {})}});
   }
 
   get code(){ return this.ctx.id.name || ''; }

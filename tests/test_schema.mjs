@@ -74,6 +74,9 @@ const db = new SQL.Database();
   try{ db.run("INSERT INTO room (id, code, created_at, last_active) VALUES (2, 'x', 1, 1)"); }
   catch(e){ e2 = e.message; }
   ok('room 是单行表（id 必须为 1）', !!e2, e2 || '没拦住');
+  /* ★ P2：「本房间已于 X 重置」读的是房间字段，不是聊天消息（G·8.4 ②）。 */
+  ok('★ room 含 last_reset_at 列（P2 重置后状态呈现的唯一出处）',
+    db.exec('PRAGMA table_info(room)')[0].values.map(r => r[1]).includes('last_reset_at'));
 }
 
 console.log('== 2. DO storage 接口：与 room.js 同构，跑通 core.js 全流程 ==');
@@ -236,7 +239,10 @@ console.log('== 5. 还原路径真跑（runLifecycle 单一源 · 旧库迁移 /
     broadcast: f => frames.push(f),
     reset: () => {
       RESET_SQL.forEach(s => db.run(s));
-      resetFrames({code:'123456', online:0}).forEach(f => frames.push(f));
+      /* ★ P2 真跑：归零必须把 last_reset_at 写成非空（不是只写 reset_at=NULL）。 */
+      const lr = db.exec('SELECT last_reset_at FROM room WHERE id = 1')[0].values[0][0];
+      ok('★ P2 归零写入 last_reset_at（真库，非空）', lr != null && Number(lr) > 0, 'got=' + lr);
+      resetFrames({code:'123456', online:0, lastResetAt:lr}).forEach(f => frames.push(f));
       return true;
     },
     sweepIdle: () => {},
@@ -250,6 +256,7 @@ console.log('== 5. 还原路径真跑（runLifecycle 单一源 · 旧库迁移 /
     const oldDdl = ddl
       .replace(/\s*reset_at\s+INTEGER,[^\n]*/, '')
       .replace(/\s*warned_for_reset_at\s+INTEGER,[^\n]*/, '')
+      .replace(/\s*last_reset_at\s+INTEGER,[^\n]*/, '')
       .replace(/-- S2 模块 B[\s\S]*?(?=-- 说明：无 visibility)/, '');
     splitDdl(oldDdl).forEach(s => old.run(s));
     old.run(`INSERT INTO room (id, code, created_at, last_active, rule, baredice, rule_set_by, rule_set_at,

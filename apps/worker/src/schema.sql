@@ -21,6 +21,7 @@ PRAGMA journal_mode = WAL;
 --   ALTER TABLE room ADD COLUMN notified_clean INTEGER NOT NULL DEFAULT 0;  -- 旧房间缺列会让 alarm 的 UPDATE 整段中断
 --   ALTER TABLE room ADD COLUMN reset_at INTEGER;                 -- S2 还原路径独立步骤：锚点列，旧房间补成 NULL（= 空房间）
 --   ALTER TABLE room ADD COLUMN warned_for_reset_at INTEGER;      -- 同上：提醒去重标记，旧房间补成 NULL
+--   ALTER TABLE room ADD COLUMN last_reset_at INTEGER;              -- P2：上次归零还原时刻，旧房间补成 NULL
 --   （idx_members_cid 见下方索引区；T6 起它是正式语句，不再是注释里的示意）
 -- ★ 三段式顺序不变：TABLES（CREATE TABLE IF NOT EXISTS 纯新增）→ ALTER 幂等补列 → INDEXES 单独建（009950）。
 
@@ -40,6 +41,7 @@ CREATE TABLE IF NOT EXISTS room (
   notified_clean INTEGER NOT NULL DEFAULT 0, -- 旧提醒标记：归零时回 0；新判定改用 warned_for_reset_at（G·8.5 坑 3）
   reset_at     INTEGER,                    -- ★ 锚点：max(计时主体每条的到期时刻)，只由用户动作刷新，alarm 绝不写
   warned_for_reset_at INTEGER,             -- ★ 本轮提醒对应的 reset_at；值变了才允许再提醒（每轮可再触发）
+  last_reset_at INTEGER,                    -- ★ P2：上次归零还原时刻；「本房间已于 X 重置」读它，不是聊天消息
   ver          INTEGER NOT NULL DEFAULT 1  -- schema 版本，便于迁移
 );
 

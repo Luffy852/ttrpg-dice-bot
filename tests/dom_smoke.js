@@ -746,6 +746,31 @@ function type(ui, net, text){
     }
   }
 
+  /* ★ P2 · 生命周期横幅（G·8.4 ①/②）：走的是生产 ui.setRoom，不另写一份判断 */
+  {
+    const banner = () => d.querySelector('#room-banner');
+    const NOW = 1772000000000;
+    ok('★ 横幅元素由 ui.js 动态建出（生成物一个字节没动）', !!banner());
+    ui.setRoom({reset_at:NOW + 3 * 86400000, server_now:NOW, warn:true,
+      warn_text:'本房间内容将重置，重要战报请先导出'});
+    ok('★ 进 7 天窗口 / warn 瞬时帧 → 横幅出现', !banner().hidden && banner().style.display !== 'none');
+    ok('★ 横幅文案含「重要战报请先导出」与预计日期',
+      /重要战报请先导出/.test(banner().textContent) && /预计 \d{4}-\d{2}-\d{2}/.test(banner().textContent),
+      banner().textContent);
+    ui.setRoom({reset_at:NOW + 30 * 86400000, server_now:NOW, warn:false});
+    ok('★ 用户动作使锚点后推 → 横幅立刻消失（不落库、不等刷新）',
+      banner().hidden && banner().style.display === 'none');
+    ui.setRoom({reset_at:null, last_reset_at:NOW - 86400000, server_now:NOW, warn:false});
+    ok('★ 重置后读房间字段 → 「本房间已于 X 重置」',
+      /本房间已于 \d{4}-\d{2}-\d{2} 重置/.test(banner().textContent), banner().textContent);
+    ok('★ 「已重置」不是聊天消息（聊天流里没有这句）', !/本房间已于/.test(d.querySelector('#stream').textContent));
+    ui.setRoom({rule:'generic'});
+    ok('★ 普通 .set 回写的 STATE 不带 reset_at，不抹掉已有生命周期状态',
+      /本房间已于/.test(banner().textContent), banner().textContent);
+    ui.setRoom({reset_at:null, last_reset_at:null, server_now:NOW, warn:false});
+    ok('★ 新一轮首条消息后横幅彻底收起', banner().hidden);
+  }
+
   console.log(bad ? ('\n❌ 端到端冒烟：' + bad + ' 项不通过') : '\n✅ 端到端冒烟全通过');
   process.exit(bad ? 1 : 0);
 })().catch(e => { console.error('❌ 冒烟崩溃：', e); process.exit(1); });
