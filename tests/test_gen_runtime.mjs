@@ -147,6 +147,15 @@ console.log('== A2·3 运行时输出规格（I·2.7 第 3 / 5 / 8 条） ==');
   ok('★ 不含逐骰明细', !/逐骰|骰面|tries|kept|明细/.test(allTxt));
   ok('★ 不含 COC 派生值 / 体格表',
     !/HP|MP|SAN|DB|体格|派生值|伤害加值|年龄|年代修正|6 版|经典变体/.test(allTxt));
+  /* ★ A3 真机反馈：第 10 条标记不能是彩色 emoji（Chrome 字体回退 → 蓝底白字方块）。
+   *   这里走的是完整 handleCommand 链路，确认接线后 20 组输出同样不退化。 */
+  const cocMarks = rowsOf(coc20).filter(r => r.k).map(r => r.k);
+  const dndMarks = rowsOf(dnd20).slice(1).map(r => r.k);
+  eq('★ 运行时 .coc 20 第 10 条标记 = ⑩', cocMarks[9], '⑩');
+  eq('★ 运行时 .dnd 20 第 10 条标记 = ⑩', dndMarks[9], '⑩');
+  ok('★ 运行时 40 个标记都不含 emoji 码点',
+    cocMarks.concat(dndMarks).every(m => Array.from(m).every(ch => ch.codePointAt(0) < 0x1F000)));
+  eq('★ 运行时 COC / DND 组标记逐项相同', cocMarks.join(','), dndMarks.join(','));
 }
 
 console.log('== A2·4 组数 N 边界与显式提示（I·2.7 第 6 条） ==');
@@ -205,6 +214,30 @@ console.log('== A2·5 帮助页（I·2.2 / I·2.6 / I·2.7 第 2 条） ==');
   ok('★ 真跑 .help dnd 的 html 含 .dnd / 组数 1–20',
     /\.dnd/.test(htmlOf(run('.help dnd', mkCtx('generic')))) &&
     /组数 1–20/.test(htmlOf(run('.help dnd', mkCtx('generic')))));
+
+  /* ★ A3 真机反馈（两条）：
+   *   ① 板块标题只留「属性生成」，不要「· .coc / .dnd（全局小工具）」后缀；
+   *   ② k 写 '<N>' 会被 defsHtml 直接拼进 HTML 当未知标签吞掉 → 只剩 '.coc '，
+   *      与第一行重复。故 k 用 '.coc N' / '.dnd N'，且断言必须走 renderDefs 之后的
+   *      HTML 字符串（只查结构化数据抓不到「浏览器吞标签」这类问题）。 */
+  const secOf = key => (Engine.HELP_BODY[key]().sections || []).find(s => /^属性生成/.test(s.h || '')) || {h:'', rows:[]};
+  for(const [key, verb] of [['coc7','coc'], ['dnd5e','dnd'], ['dnd5r','dnd']]){
+    const sec = secOf(key);
+    eq('★ ' + key + ' 属性生成板块标题恰好是「属性生成」', sec.h, '属性生成');
+    const ks = (sec.rows || []).map(r => String(r.k));
+    ok('★ ' + key + ' 帮助页 k 不含尖括号（避免 <N> 被 HTML 吞）',
+      ks.every(k => !/[<>]/.test(k)), JSON.stringify(ks));
+    ok('★ ' + key + ' 帮助页含 .' + verb + ' N 字面', ks.includes('.' + verb + ' N'), JSON.stringify(ks));
+  }
+  for(const [cmd, verb] of [['.help coc','coc'], ['.help dnd','dnd']]){
+    const html = htmlOf(run(cmd, mkCtx('generic')));
+    ok('★ 真跑 ' + cmd + ' 的 HTML 板块标题是「属性生成」',
+      /<div class="hh">属性生成<\/div>/.test(html), html.slice(0, 120));
+    ok('★ 真跑 ' + cmd + ' 的 .' + verb + ' N 真的渲染在 k 列',
+      new RegExp('<span class="hk">\\.' + verb + ' N</span>').test(html));
+    ok('★ 真跑 ' + cmd + ' 的 HTML 不含 <N> 尖括号写法（防浏览器吞标签、防回退）',
+      !html.includes('.' + verb + ' <N>'));
+  }
 }
 
 console.log('== A2·6 消息流 / 导出 / 体积（I·2.7 第 9 条） ==');

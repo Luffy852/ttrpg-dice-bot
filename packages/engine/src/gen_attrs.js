@@ -52,11 +52,14 @@ function genCocGroup(){
   return out;
 }
 
-/* 组标记：1–9 用示例的 keycap，10 用 🔟，11–20 用带圈数字 ⑪–⑳。
+/* 组标记：1–9 用示例的 keycap，10–20 用带圈数字 ⑩–⑳（U+2469..U+2473 连续同族）。
+ * ★ A3 真机反馈：第 10 条原用 🔟（U+1F51F 彩色 emoji），Chrome 会走 emoji 字体回退、
+ *   无视 .hk 的 monospace / color CSS，渲染成蓝底白字方块，与其余 19 条明显不一致。
+ *   改用 ⑩ 后与 ⑪–⑳ 同字体族，1–9 / 11–20 的既有视觉保持不动。
  * 由代码生成，不手写 20 项数据表。 */
 function groupMark(i){
-  if(i <= 9) return String(i) + '\u20E3';
-  if(i === 10) return '\u{1F51F}';
+  if(i <= 9) return String(i) + '\u2469';
+  if(i === 10) return '\u2469';
   return String.fromCodePoint(0x246A + i - 11);
 }
 
