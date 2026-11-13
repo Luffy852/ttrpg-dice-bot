@@ -31,6 +31,7 @@ const roomRaw   = read('apps/worker/src/room.js');
 const schemaRaw = read('apps/worker/src/schema.sql');
 const coreRaw   = read('apps/worker/src/core.js');
 const lifeRaw   = read('apps/worker/src/lifecycle.js');
+const uiRaw     = read('apps/web/src/ui.js');
 const stripJs  = t => t.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(?<!:)\/\/[^\n]*/g, '');
 const stripSql = t => t.replace(/\/\*[\s\S]*?\*\//g, '').replace(/--[^\n]*/g, '');
 const room = stripJs(roomRaw), schema = stripSql(schemaRaw), core = stripJs(coreRaw), life = stripJs(lifeRaw);
@@ -378,6 +379,54 @@ console.log('== ⑩ alarm 新形态（L6 / G·8.5 五坑 · 单实例 / 空容�
     !/WARN_DAYS/.test(room) && !/created_at > WARN/.test(room));
   ok('★ 重置那一刻不排下一轮闹钟（runLifecycle 归零后直接 return）',
     /return \{reset:true, warned, armAt:null\}/.test(life));
+}
+
+
+console.log('== ⑪ P2 横幅字段链路（坑 #42：接口对齐 ≠ 口径对齐）==');
+{
+  const ui = stripJs(uiRaw);
+  /* 服务端三处出口（warnFrame / resetFrames / WELCOME + /meta + refreshAnchor 的 STATE）
+     与前端 setRoom 必须逐字段对齐 —— 少一个字段就是「方法都在、却一致地读不到」。 */
+  const fields = ['reset_at', 'last_reset_at', 'warn', 'warn_text', 'server_now'];
+  const setRoom = (ui.match(/setRoom\(r\)\{[\s\S]*?\n    \},/) || [''])[0];
+  const readField = (src, f) => new RegExp("'" + f + "'\\s+in\\s+r").test(src);
+  ok('★ ui.setRoom 逐字段读取生命周期字段（' + fields.join(' / ') + '）',
+    fields.every(f => readField(setRoom, f)),
+    fields.filter(f => !readField(setRoom, f)).join(','));
+  ok('★ 探针：漏读一个字段即红（自证）',
+    !fields.every(f => readField("setRoom(r){ if('reset_at' in r) st.x = r.reset_at; }", f)));
+  const warnBody = (life.match(/warnFrame\s*=\s*[\s\S]*?\};/) || [''])[0];
+  const resetBody = (life.match(/resetFrames\s*=\s*[\s\S]*?\];/) || [''])[0];
+  ok('★ warnFrame 带 reset_at / warn / warn_text（提醒瞬时帧）',
+    /reset_at/.test(warnBody) && /warn\s*:\s*true/.test(warnBody) && /warn_text/.test(warnBody));
+  ok('★ resetFrames 带 reset_at:null / last_reset_at / warn:false / server_now',
+    /reset_at\s*:\s*null/.test(resetBody) && /last_reset_at/.test(resetBody) &&
+    /warn\s*:\s*false/.test(resetBody) && /server_now/.test(resetBody));
+  /* ★ 先红后绿补强：只数全文出现次数会放过「/meta 或 WELCOME 单独漏一个字段」——
+     别的出口还有同名列，断言照样绿。必须**逐个出口**截出帧体再逐字段验。 */
+  const metaResp    = (room.match(/Response\.json\(\{code:this\.code[\s\S]*?\}\)/) || [''])[0];
+  const welcomeFrm  = (room.match(/this\.send\(ws, \{t:OUT\.WELCOME[\s\S]*?\}\);/) || [''])[0];
+  const bcBody      = (room.match(/broadcastRoomState\(extra\)\{[\s\S]{0,600}/) || [''])[0];
+  ok('★ /meta 响应体带 reset_at / last_reset_at / server_now',
+    /reset_at/.test(metaResp) && /last_reset_at/.test(metaResp) && /server_now/.test(metaResp));
+  ok('★ WELCOME 帧 room 带 reset_at / last_reset_at / server_now',
+    /reset_at/.test(welcomeFrm) && /last_reset_at/.test(welcomeFrm) && /server_now/.test(welcomeFrm));
+  ok('★ refreshAnchor 的 STATE 帧带同一组字段（三出口不漂移）',
+    /t:OUT\.STATE/.test(bcBody) && /reset_at/.test(bcBody) && /last_reset_at/.test(bcBody) &&
+    /warn/.test(bcBody) && /server_now/.test(bcBody));
+  ok('★ 探针：任一出口漏一个字段即红（自证）',
+    !/last_reset_at/.test('Response.json({code:this.code, reset_at:null, server_now:1})'));
+  ok('★ refreshAnchor 在用户动作后广播 STATE（横幅消失 / 后推有来源）',
+    /async refreshAnchor\(\)[\s\S]{0,400}broadcastRoomState\(\)/.test(room) &&
+    /broadcastRoomState\(extra\)\{[\s\S]{0,400}t:OUT\.STATE/.test(room));
+  ok('★ last_reset_at 列两份 DDL 都有（schema.sql 是唯一出处）',
+    /\blast_reset_at\b/.test(schema) && /\blast_reset_at\b/.test(room) &&
+    /ALTER TABLE room ADD COLUMN last_reset_at/.test(room));
+  ok('★ RESET_SQL 写 last_reset_at、且横幅不进聊天流（零落库消息）',
+    /last_reset_at\s*=/.test((life.match(/RESET_SQL\s*=\s*\[([\s\S]*?)\];/) || [,''])[1]) &&
+    !/kind\s*:\s*['"]sys['"]/.test(resetBody) && !/insertMsgs|allocSeq/.test(resetBody));
+  ok('★ 探针：把横幅写成落库 sys 消息即红（自证）',
+    /kind\s*:\s*['"]sys['"]/.test("broadcast({t:OUT.STATE}); insertMsgs([{kind:'sys'}]);"));
 }
 
 console.log('---------------------------');

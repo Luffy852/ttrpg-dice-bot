@@ -24,7 +24,53 @@ export function createUI({code, onSubmit, onExport, onImport}){
   const seen = new Set();
   const pending = new Map();               // req_id → 占位气泡元素
   const st = {rule:'generic', baredice:false, me:'玩家', members:[], code,
-    online:0, total:0, msgTotal:null, seqAtWelcome:0};
+    online:0, total:0, msgTotal:null, seqAtWelcome:0,
+    /* ★ P2：房间生命周期状态（G·8.4 ①/②）。只读 STATE / WELCOME 帧带来的房间字段，
+       不落库、不进聊天流；服务端时间优先，客户端时钟只作兜底。 */
+    resetAt:null, lastResetAt:null, warn:false, warnText:'', serverNow:null};
+
+  /* ---------- P2 · 生命周期横幅 ----------
+   * 【为什么动态创建】index.html 是 build-web-shell.mjs 的生成物，手改会被下次 build 覆盖；
+   *   ui.js 是源码，横幅在这里建一次即可，生成物 31 个 / 193,924 B 一个字节都不动。
+   * 【为什么挂在 topbar 之后】ui.reset() 会清空 $stream，挂在聊天流里的元素会被顺带抹掉；
+   *   顶栏之后的横幅由 refreshBanner() 显式管理，重置那一刻该怎么变由 STATE 帧说了算。 */
+  let $banner = document.getElementById('room-banner');
+  /* ★ 一个页面一块横幅：dom_smoke 会额外建两个 UI 实例跑分页 / 顺序回归，
+     各自新建会在 DOM 里留下 3 个同 id 元素，querySelector 拿到的就不是当前实例那块。 */
+  if(!$banner){
+    $banner = document.createElement('div');
+    $banner.id = 'room-banner';
+    $banner.className = 'notice';
+    $banner.hidden = true;
+    $banner.style.cssText = 'margin:6px 10px;padding:8px 12px;border-radius:10px;' +
+      'background:#fff7e6;border:1px solid #f0d9a8;color:#7a5b12;font-size:12.5px;line-height:1.5';
+    const $topbar = $('topbar');
+    if($topbar) $topbar.insertAdjacentElement('afterend', $banner);
+    else document.body.insertBefore($banner, document.body.firstChild);
+  }
+  const DAY = 86400000;
+  const fmtDay = ts => {
+    const t = Number(ts);
+    return Number.isFinite(t) ? new Date(t).toISOString().slice(0, 10) : '';
+  };
+  function refreshBanner(){
+    if(!$banner) return;
+    const now = Number(st.serverNow) || Date.now();
+    const at = st.resetAt == null ? null : Number(st.resetAt);
+    /* 服务端提醒帧（warn:true）直接触发；进房 / 刷新时按 reset_at − 7d 自行判窗口。
+       不用客户端时间当权威：welcome 与 STATE 都带 server_now。 */
+    const inWindow = at != null && now >= at - 7 * DAY && now < at;
+    let text = '';
+    if(st.warn === true || inWindow){
+      text = st.warnText || '本房间内容将重置，重要战报请先导出';
+      if(at != null) text += '（预计 ' + fmtDay(at) + '）';
+    } else if(st.lastResetAt != null && at == null){
+      text = '本房间已于 ' + fmtDay(st.lastResetAt) + ' 重置';
+    }
+    $banner.textContent = text ? 'ⓘ ' + text : '';
+    $banner.hidden = !text;
+    $banner.style.display = text ? '' : 'none';
+  }
 
   /* ---------- 渲染：与单机版同一个 renderMsg ---------- */
   /** 骰娘回复的「回应谁」标记。actor 由服务端写好（core.js），这里只负责显示 */
@@ -403,6 +449,14 @@ export function createUI({code, onSubmit, onExport, onImport}){
     /* ★ 导出弹窗要列当前成员当筛选项：从 setMembers 收到的那一份读，不另存一份副本 */
     members(){ return (st.members || []).slice(); },
     setRoom(r){
+      /* ★ P2：用 'in' 而不是真值判断 —— 普通 .set 回写的 STATE 只带 rule / baredice，
+         不带 reset_at；若按真值覆盖会把已有的预计清空时刻抹成 null，横幅凭空消失。 */
+      if('reset_at' in r) st.resetAt = r.reset_at;
+      if('last_reset_at' in r) st.lastResetAt = r.last_reset_at;
+      if('warn' in r) st.warn = !!r.warn;
+      if('warn_text' in r) st.warnText = r.warn_text;
+      if('server_now' in r) st.serverNow = r.server_now;
+      refreshBanner();
       if(r.rule) st.rule = r.rule;
       if(r.baredice != null) st.baredice = !!r.baredice;
       if(r.msg_count != null) st.msgTotal = r.msg_count;
