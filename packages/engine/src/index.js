@@ -12,6 +12,9 @@ export * from './parse.js';
 export * from './roll.js';
 export * from './dnd.js';
 export * from './coc.js';
+/* ★ S2 模块 A：生成器依赖 dnd.js / coc.js 的静态数据，故排在其后；
+ *   它不注册别名，不影响既有别名注册顺序（index.js 头注释）。 */
+export * from './gen_attrs.js';
 export * from './dh.js';
 export * from './fu.js';
 export * from './pack_generic.js';
