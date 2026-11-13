@@ -18,6 +18,10 @@ const DND_STATIC = [
   {key:'hp', zh:'生命值',   en:'HP', aliases:['hp','生命','生命值','血量','hp值','hitpoints','hit points']}
 ];
 const DND_STATIC_SET = new Set(DND_STATIC.map(x => x.key));
+/* ★ S2 模块 A：DND 属性生成的标准数组（全新常量，只放 dnd.js 一处）。
+ *   生成器按它渲染「每次回复首行固定」，总分现场求和；不进规则包契约、
+ *   不给属性科目名，也不与 DND_ABILITIES 产生耦合（I·2.1 / I·2.4）。 */
+const DND_STANDARD_ARRAY = [15, 14, 13, 12, 10, 8];
 function abilityMod(score){ return Math.floor((score - 10) / 2); }
 function profFromLv(lv){
   if(!(lv >= 1)) return null;
@@ -75,4 +79,4 @@ DND_SKILLS.forEach(s => { [s.zh, s.en, s.abbr].concat(s.alt || []).forEach(k => 
 
 /* ★ 必须单行：load-engine.js 是**按正则剥 import/export 再拼成一个文件**的，
  *   多行 export 会漏掉后半截 → 整个引擎语法错误（刚才就炸了一次）。 */
-export { DND_STATIC, DND_STATIC_SET, ABIL_KEYS, ABIL_ZH, abilityMod, profFromLv, DND_ABILITIES, DND_SKILLS, SKILL_INDEX };
+export { DND_STATIC, DND_STATIC_SET, DND_STANDARD_ARRAY, ABIL_KEYS, ABIL_ZH, abilityMod, profFromLv, DND_ABILITIES, DND_SKILLS, SKILL_INDEX };
