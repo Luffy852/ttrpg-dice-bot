@@ -58,7 +58,7 @@ function genCocGroup(){
  *   改用 ⑩ 后与 ⑪–⑳ 同字体族，1–9 / 11–20 的既有视觉保持不动。
  * 由代码生成，不手写 20 项数据表。 */
 function groupMark(i){
-  if(i <= 9) return String(i) + '\u2469';
+  if(i <= 9) return String(i) + '\u20E3';
   if(i === 10) return '\u2469';
   return String.fromCodePoint(0x246A + i - 11);
 }
