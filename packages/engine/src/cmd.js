@@ -16,9 +16,9 @@ import { GEN_SPEC, genAttrs } from './gen_attrs.js';
 /* ★ S2 模块 B：ri / init 是「状态型」专属动词 —— 归属在这里登记（清单/切分锚点用），
  *   执行层在 Worker（要写 combat* 表），core.apply 会先分流，生产链路不会走到本文件的
  *   规则专属分支。运行时命中动词靠 card.js 的 verb 域 lookupAlias，不靠这个集合。
- *   ★ S2 模块 C · C1：sc 是「计算型」专属动词（COC_PACK.verbs.sc 执行），同由 verbOwner 登记；
- *   VERBS 只是动词清单，随注册同步（19→20；C2 加 ds 后 21）。 */
-const VERBS = new Set(['r','h','help','status','stat','set','rule','name','nn','st','rc','ra','rd','dh','fu','ri','init','coc','dnd','sc']);
+ *   ★ S2 模块 C：sc / ds 是「计算型」专属动词（COC_PACK.verbs.sc / DND_PACK.verbs.ds 执行），
+ *   同由 verbOwner 登记；VERBS 只是动词清单，随注册同步（19 → C1 20 → C2 21）。 */
+const VERBS = new Set(['r','h','help','status','stat','set','rule','name','nn','st','rc','ra','rd','dh','fu','ri','init','coc','dnd','sc','ds']);
 const LIMIT_MSG = '指令规模过大（单次骰数上限 100 / 面数上限 10000 / 合计 500）';
 const SYNTAX_MSG = '暂不支持该语法（括号/乘除/骰池等），可用 .help 查看支持的格式';
 const NO_CARD_MSG = '尚未绑定角色卡，可用 <b>.st set 力量 16 敏捷 14 体质 15 智力 10 感知 12 魅力 8 等级 5</b> 绑定；或直接用 <b>.r 1d20+3</b> 投掷';
@@ -379,7 +379,11 @@ function handleCommand(text, ctx){
     }
     if(!fn){
       const ownPack = RULE_PACKS[owner];
-      if(ownPack && ownPack.initiative && ownPack.initiative.ownerNote){
+      const decl = ownPack && ownPack.verbs && ownPack.verbs[verb];
+      /* ★ S2 模块 C · C2：先攻专属文案只给状态型动词（ri / init）。计算型动词（sc / ds）
+       *   打错规则时必须走下面的通用提示 —— 否则 DND_PACK.initiative.ownerNote 会把 .ds
+       *   也写成「.ri / .init」的文案（张冠李戴）。C1 的 .sc 行为不变（COC 包无 ownerNote）。 */
+      if(decl && decl.kind === 'state' && ownPack.initiative && ownPack.initiative.ownerNote){
         notice(ownPack.initiative.ownerNote(RULE_META[room.rule].name));
         return {msgs:out, handled:true};
       }

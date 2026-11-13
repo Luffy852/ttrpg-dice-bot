@@ -74,7 +74,7 @@ console.log('== C-1 · 动词注册与前缀（Q1 / A.0.1 中文句号订正） 
     Engine.detectConflicts('verb', [{key:'sc', aliases:['sc','理智']}]).length, 0);
   eq('ALIAS.conflicts 为空（无别名被静默抢走）', Engine.ALIAS.conflicts.length, 0);
   eq('verbOwner(sc) = coc7（归属单一源）', Engine.verbOwner('sc'), 'coc7');
-  eq('VERBS.size = 20（C1 加 sc；C2 加 ds 后 21）', Engine.VERBS.size, 20);
+  eq('VERBS.size = 21（C1 加 sc → 20；C2 加 ds → 21）', Engine.VERBS.size, 21);
   ok('VERBS 含 sc', Engine.VERBS.has('sc'));
 }
 
@@ -198,9 +198,10 @@ console.log('== C-6 · 零协议 / 零 Worker / 零 schema / 零前端（I·1 / 
   ok('★ frame-route 未登记 INIT / GEN / KIND 帧（E1）', !/OUT\.(INIT|GEN|KIND)/.test(frame));
   ok('★ COC_PACK.verbs.sc 是函数（计算型专属动词，非状态声明）',
     typeof ((Engine.COC_PACK || {}).verbs || {}).sc === 'function');
-  ok('★ DND_PACK.verbs 仍只有状态型 ri / init（C1 不碰先攻）', (() => {
+  ok('★ DND_PACK.verbs 含状态型 ri / init ＋ 计算型 ds（C2 后；先攻声明不回退）', (() => {
     const v = (Engine.DND_PACK || {}).verbs || {};
-    return Object.keys(v).sort().join(',') === 'init,ri' && v.ri.kind === 'state' && v.init.kind === 'state';
+    return Object.keys(v).sort().join(',') === 'ds,init,ri' &&
+      v.ri.kind === 'state' && v.init.kind === 'state' && typeof v.ds === 'function';
   })());
   ok('★ 五个包必选契约字段未增补（verbs / ownerNote 均为可选，不改 pack-contract.js）',
     /export \{ PACK_FIELDS, CONDITIONAL_FIELDS \}/.test(read('packages/engine/src/pack-contract.js')));

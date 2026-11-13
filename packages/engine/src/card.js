@@ -90,7 +90,7 @@ registerAliases('verb', [
   {key:'fu',     display:'.fu',     aliases:['fu','物语','物语检定','最终物语']},
   /* ★ S2 模块 B：先攻动词。中文只收「先攻 / 先攻表」两个（CJK_VERBS 长优先，
    *   `.先攻表` 抢在 `.先攻` 之前；`.先攻表哥` 被 init 抢走是已接受的边角，写进帮助）。
-   *   ★ 模块 C 的 `.理智` 已于 C1 在下方注册；`.死豁` / `.死亡豁免` 仍按 I·消费状态表留到 C2。 */
+   *   ★ 模块 C 的 `.理智` 已于 C1、`.死豁` / `.死亡豁免` 已于 C2 在下方注册。 */
   {key:'ri',     display:'.ri',     aliases:['ri','先攻']},
   {key:'init',   display:'.init',   aliases:['init','先攻表']},
   /* ★ S2 模块 A：属性生成的两个全局小工具动词（I·2.2）。
@@ -104,7 +104,11 @@ registerAliases('verb', [
    *   中文只收「理智」这一个，不注册「理智检定」等更长形式；长前缀切出来的多余
    *   技能名由 COC_PACK.verbs.sc 显式报错，不静默改检定目标（Q3）。
    *   归属由 packs.js 的 verbOwner 单一源登记（只有 COC_PACK 有 verbs.sc）。 */
-  {key:'sc',     display:'.sc',     aliases:['sc','理智']}
+  {key:'sc',     display:'.sc',     aliases:['sc','理智']},
+  /* ★ S2 模块 C · C2（I·4.2）：`.ds` / `.死亡豁免` / `.死豁` = 带规则文字提示的 D20 检定。
+   *   中文只收这两个（均为 2 字以上，长优先；不注册更长的「死亡豁免检定」等）。
+   *   归属由 packs.js 的 verbOwner 单一源登记（只有 DND_PACK 有 verbs.ds）。 */
+  {key:'ds',     display:'.ds',     aliases:['ds','死亡豁免','死豁']}
 ]);
 /* ★ 先攻子命令单独成域，不与 verb / mode / switch 串味（I·3.4.1）。
  *   normToken 去空格与下划线 → `.init 战斗 结束` 与 `.init 战斗结束` 免费等价；
