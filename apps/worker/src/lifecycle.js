@@ -13,13 +13,25 @@
  *   ★ reset_at = max(计时主体每条的到期时刻)，**只由用户动作刷新，alarm 绝不写**。
  *   ★ 归零 = 某次滚动 DELETE 后计时主体「由非空变空」，同一次 alarm 里静默还原。
  *   ★ last_reset_at 由 RESET_SQL 用库时间写入（零参数单一源），io.reset() 不穿过 now。
+ *
+ * 【★ D1 用量根治（2026-11-14）】alarm 链由「在线即 60s 自续」改为**按日 lifecycle**：
+ *   半开连接巡检移到 room.js 的 ws 帧路径（webSocketMessage → sweepIdleThrottled），
+ *   零 alarm / 零全表 SQL；本文件每轮只跑一次滚动清理＋归零判据，且不再写 last_active、
+ *   不再算 SQL_MIN_EXPIRY 表达式全表聚合。用户动作路径判「有没有内容」改 SQL_HAS_CONTENT。
  * ========================================================================== */
 import {OUT} from '../../../packages/protocol/src/frames.js';
 
 export const DAY      = 86400000;
 export const KEEP_MS  = 30 * DAY;
 export const WARN_MS  = 7 * DAY;      // 到期前 7 天提醒（口径 6：提醒不能是消息）
-export const SWEEP_MS = 60 * 1000;    // 半开连接巡检间隔
+/* ★ D1（2026-11-14 · DO rows_read 用量根治）：生命周期（提醒 / 滚动清理 / 归零）
+ *   改为**按日**跑。旧形态「online>0 → now+SWEEP_MS(60s)」让挂着 ws 的房间
+ *   每天自续 1440 次，每轮还跑 COUNT(*)×2 ＋ MIN(CASE…) 表达式全表聚合×2 表，
+ *   ≈4~8 次表级全量遍历 / 60s，账户级 5,000,000 rows_read/日 免费额度被两个
+ *   只挂着不用的房间吃光（2026-11-13 20:57 UTC 到 90%、22:57 UTC 超限）。
+ *   用户口径：不升级付费；过时清理按日已足够，根本不需要高频遍历。 */
+export const LIFECYCLE_MS = DAY;     // ★ 按日（用户 2026-11-14 定）
+export const SWEEP_MS = 60 * 1000;   // ★ D1 起只作「ws 帧驱动巡检」的内存节流，不再用于排 alarm
 
 export const WARN_TEXT = '本房间内容将重置，重要战报请先导出';
 
@@ -35,6 +47,11 @@ export const SQL_SWEEP_IDEM = 'DELETE FROM idempotency WHERE ts < ?';
 /** 「是否仍有可清除信息」唯一判据：只读计时主体，不读 last_active / 辅助表（C1 / 坑 5） */
 export const SQL_COUNT_CONTENT =
   'SELECT (SELECT COUNT(*) FROM messages) + (SELECT COUNT(*) FROM idempotency) AS c';
+
+/** ★ D1：用户动作路径判「有没有内容」——O(1) 存在性，替代 COUNT(*) 全表扫描。
+ *  归零判据「由非空变空」仍用 SQL_COUNT_CONTENT，但只在每日一次 lifecycle 里跑。 */
+export const SQL_HAS_CONTENT =
+  'SELECT (SELECT 1 FROM messages LIMIT 1) IS NOT NULL OR (SELECT 1 FROM idempotency LIMIT 1) IS NOT NULL AS c';
 
 /** reset_at = max(到期)；只由用户动作路径调用（发指令 / 导出 / 导入） */
 export const SQL_MAX_EXPIRY =
@@ -70,15 +87,15 @@ export const shouldWarn = ({now, resetAt, warnedForResetAt}) =>
 /** 归零判据：滚动 DELETE 后由非空变空（口径 5 / L2） */
 export const shouldReset = ({hadContent, remaining}) => !!hadContent && Number(remaining) === 0;
 
-/** 唯一闹钟时刻：min(下次 idle 巡检, 下一条到期, reset_at−7d, reset_at)。
- *  三者皆无（无在线 / 无内容 / reset_at 已过或空）→ null = 不排新闹钟（口径 8 / L6）。 */
-export function nextAlarmAt({now, online, nextExpiry, resetAt, hasContent}){
+/** ★ D1 唯一闹钟时刻：min(按日 lifecycle, reset_at−7d, reset_at)。
+ *  · 不再吃 online / nextExpiry：半开连接巡检改由 ws 帧驱动（零 alarm / 零 SQL），
+ *    过时清理按日跑已足够，不需要精确到「下一条到期」的时刻（用户 2026-11-14 定）。
+ *  · 两者皆无（无内容 / reset_at 已过或空）→ null = 不排新闹钟（口径 8 / L6）。
+ *  ★ 只排「还没到」的候选：过去时刻不能 clamp 成 now+1s —— 那会让已进入提醒窗口 /
+ *    内容刚清完的房间每秒重排一次闹钟，空房间永远停不下来（口径 8）。 */
+export function nextAlarmAt({now, resetAt, hasContent}){
   const at = [];
-  if(Number(online) > 0) at.push(Number(now) + SWEEP_MS);
-  /* ★ 只排「还没到」的到期时刻：已经过去的候选不能 clamp 成 now+1s —— 那会让
-     已进入提醒窗口 / 内容刚清完的房间每秒重排一次闹钟，空房间永远停不下来（口径 8）。 */
-  if(hasContent && nextExpiry != null && Number(nextExpiry) > Number(now))
-    at.push(Number(nextExpiry));
+  if(hasContent) at.push(Number(now) + LIFECYCLE_MS);
   if(resetAt != null && Number(resetAt) > Number(now)){
     const warnAt = Number(resetAt) - WARN_MS;
     if(warnAt > Number(now)) at.push(warnAt);   // 还没进 7 天窗口才排「提醒」这一跳
@@ -108,9 +125,11 @@ export const resetFrames = ({code, online, lastResetAt}) => [
 /* ---------------------------------------------------------------------------
  * runLifecycle —— alarm 的**唯一决策入口**（生产与真跑测试共用一个函数）
  *   db: {q(sql, ...args) → 行对象数组, run(sql, ...args) → void}
- *   io: {broadcast(frame), reset(), sweepIdle(), onlineCount(), rearm(at)}
+ *   io: {broadcast(frame), reset(), rearm(at)}
  *     · reset() 由 room.js 的 resetRoom() 提供：执行 RESET_SQL + 发 resetFrames
  *     · rearm(at) 由 room.js 提供：getAlarm() 判重、只在需要提前时覆盖（L6）
+ *     · ★ D1：sweepIdle / onlineCount 仍可在替身里给，但 alarm 链**不再调用**
+ *       （巡检由 ws 帧驱动；在线数只在 presenceFrame / resetRoom 里直接读）
  *   ★ 重置分支直接 return：不排下一轮闹钟、不写 last_active（L3 / 口径 8）。
  * ------------------------------------------------------------------------- */
 export async function runLifecycle(db, io, now){
@@ -139,12 +158,11 @@ export async function runLifecycle(db, io, now){
     return {reset:true, warned, armAt:null};
   }
 
-  /* ④ 常规：巡检 + 唯一闹钟续排（空容器自然不排，口径 8） */
-  run('UPDATE room SET last_active = ? WHERE id = 1', now);
-  io.sweepIdle();
-  const nextExpiry = q(SQL_MIN_EXPIRY)[0].e;
-  const armAt = nextAlarmAt({now, online:io.onlineCount(), nextExpiry,
-    resetAt:room.reset_at, hasContent:remaining > 0});
+  /* ④ 常规：按日续排（空容器自然不排，口径 8）。
+     ★ D1：巡检由 ws 帧驱动（webSocketMessage → sweepIdleThrottled），alarm 链不再
+       调 io.sweepIdle()；不再每轮写 last_active（坑 5 同型）；不再算 SQL_MIN_EXPIRY
+       表达式全表聚合（按日清理已足够）。这一轮只剩 1 次 rearm。 */
+  const armAt = nextAlarmAt({now, resetAt:room.reset_at, hasContent:remaining > 0});
   await io.rearm(armAt);
   return {reset:false, warned, armAt};
 }

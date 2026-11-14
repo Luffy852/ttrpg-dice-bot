@@ -18,7 +18,8 @@ import {createRequire} from 'node:module';
 /* ★ S2 第二步：生命周期决策与 SQL 的单一源。下面第 4 / 5 节真跑的就是生产那一份
    （runLifecycle 是 room.js alarm() 的唯一决策入口），不在测试里另抄一份顺序。 */
 import {runLifecycle, RESET_SQL, SQL_SWEEP_MSGS, SQL_SWEEP_IDEM, SQL_COUNT_CONTENT,
-  SQL_MAX_EXPIRY, SQL_MIN_EXPIRY, shouldWarn, shouldReset, nextAlarmAt,
+  SQL_MAX_EXPIRY, SQL_MIN_EXPIRY, SQL_HAS_CONTENT, LIFECYCLE_MS,
+  shouldWarn, shouldReset, nextAlarmAt,
   expiryOf, idemExpiryOf, KEEP_MS, WARN_MS, SWEEP_MS, resetFrames, warnFrame} from '../apps/worker/src/lifecycle.js';
 const initSqlJs = createRequire(import.meta.url)('sql.js');   // sql.js 只有 CJS 入口
 
@@ -373,12 +374,16 @@ console.log('== 5. 还原路径真跑（runLifecycle 单一源 · 旧库迁移 /
       shouldReset({hadContent:true, remaining:0}) &&
       !shouldReset({hadContent:true, remaining:1}) &&
       !shouldReset({hadContent:false, remaining:0}));
-    ok('★ 5.3 nextAlarmAt：空容器不排 / 有人巡 1 分钟 / 取最早候选',
+    /* ★ D1（2026-11-14 用量根治）：在线不再触发 60s 巡检闹钟；生命周期按日排。
+     *  四条断言不删、只换守的东西（旧「有人巡 1 分钟」已作废）。 */
+    ok('★ 5.3 nextAlarmAt（D1）：空容器不排 / 在线也不排短周期 / 有内容按日',
       nextAlarmAt({now, online:0, nextExpiry:null, resetAt:null, hasContent:false}) === null &&
-      nextAlarmAt({now, online:1, nextExpiry:null, resetAt:null, hasContent:false}) === now + SWEEP_MS &&
-      nextAlarmAt({now, online:1, nextExpiry:now + 2 * DAY, resetAt:now + 3 * DAY, hasContent:true}) === now + SWEEP_MS);
-    eq('★ 5.3 nextAlarmAt：无在线但有内容 → 排到下一条到期',
-      nextAlarmAt({now, online:0, nextExpiry:now + DAY, resetAt:null, hasContent:true}), now + DAY);
+      nextAlarmAt({now, online:3, nextExpiry:null, resetAt:null, hasContent:false}) === null &&
+      nextAlarmAt({now, online:3, nextExpiry:now + 2 * DAY, resetAt:now + 3 * DAY, hasContent:true}) === now + LIFECYCLE_MS);
+    eq('★ 5.3 nextAlarmAt（D1）：无在线但有内容 → 同样按日（不再精确排下一条到期）',
+      nextAlarmAt({now, online:0, nextExpiry:now + 2 * DAY, resetAt:null, hasContent:true}), now + LIFECYCLE_MS);
+    eq('★ 5.3 nextAlarmAt（D1）：无内容但 reset_at 未到 → 只排 reset_at 那一跳',
+      nextAlarmAt({now, online:0, nextExpiry:null, resetAt:now + 3 * DAY, hasContent:false}), now + 3 * DAY);
     /* reset_at / 下一条到期 SQL 真跑：idempotency 也是计时主体 */
     const d2 = new SQL.Database();
     splitDdl(ddl).forEach(s => d2.run(s));
@@ -393,6 +398,12 @@ console.log('== 5. 还原路径真跑（runLifecycle 单一源 · 旧库迁移 /
     eq('★ 5.3 SQL_MIN_EXPIRY 取下一条到期', driver(d2).q(SQL_MIN_EXPIRY)[0].e, now + 10 * DAY);
     eq('★ 5.3 C1 SQL_COUNT_CONTENT 不读辅助表（塞了先攻两表结果仍是 3）',
       driver(d2).q(SQL_COUNT_CONTENT)[0].c, 3);
+    eq('★ 5.3 D1 SQL_HAS_CONTENT：O(1) 存在性判据（有内容 = 1，不读辅助表）',
+      driver(d2).q(SQL_HAS_CONTENT)[0].c, 1);
+    const d3 = new SQL.Database();
+    splitDdl(ddl).forEach(s => d3.run(s));
+    eq('★ 5.3 D1 SQL_HAS_CONTENT：空库 = 0（用户动作路径不再 COUNT(*) 全表）',
+      driver(d3).q(SQL_HAS_CONTENT)[0].c, 0);
   }
 }
 
