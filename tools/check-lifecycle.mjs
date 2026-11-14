@@ -51,7 +51,8 @@ const CONTRACT = {
   ],
   /* ⑥ 提醒非消息 / B2 零消息：新增的还原路径不得落消息、不得续期、不得占 seq */
   noMessageCalls: ['insertMsgs', 'allocSeq', 'keep_until'],
-  /* ⑦ 锚点隔离（坑 5）：last_active 由 alarm 自己每次续写，不能当存活/重置判据 */
+  /* ⑦ 锚点隔离（坑 5）：last_active 不能当存活/重置判据。
+     ★ D1 起 alarm 链不再续写它（只剩建房 INSERT 与 ws 握手 UPDATE 两处写入）。 */
   lastActiveAllowed: [
     /^\s*last_active\s+INTEGER/,                          // 表定义
     /INSERT\s+(?:OR\s+IGNORE\s+)?INTO\s+room\s*\([^)]*\blast_active\b/i,  // 建房时写初始值的列清单
@@ -75,7 +76,7 @@ const CONTRACT = {
   },
   /* ⑩ 明确的用户请求路径（L6 / G·8.5）：重新 arm 只能挂在这些地方 */
   userPaths: ['/join', '/ws', 'IN.CMD', '/export', '/import'],
-  knownDebt: 'S1 旧现状（alarm 落 kind:sys 提醒 / 无条件 setAlarm / 每日空转）已由还原路径独立步骤改造；本轮起 ⑥ / ⑨ / ⑩ 均为正向断言，不再「盯将来路径、旧现状不判红」',
+  knownDebt: 'S1 旧现状（alarm 落 kind:sys 提醒 / 无条件 setAlarm / 每日空转）已由还原路径独立步骤改造；D1（2026-11-14）再把「在线即 60s 巡检闹钟」改为「生命周期按日 ＋ 巡检由 ws 帧驱动」，根除 DO rows_read 用量爆表；本轮起 ⑥ / ⑨ / ⑩ / ⑫ 均为正向断言，不再「盯将来路径、旧现状不判红」',
 };
 
 /** 找出「还原 / 重置」函数（将来功能开发轮新增的路径），花括号配平取整个函数体 */
@@ -304,8 +305,10 @@ console.log('== ⑨ C1–C5 先攻表清理守恒（附录 I·3.8.2 · 第二步
   ok('★ C3 还原路径零消息 / 零 seq / 零续期 / 零落库广播（瞬时帧允许）',
     resets.length === 1 && resets.every(b => noMsg(b.body)) &&
     !/insertMsgs|allocSeq/.test(lifeBody));
+  /* ★ D1：旧锚点「run('UPDATE room SET last_active = ?', now)」已从 alarm 链移除，
+     改用「const armAt」切尾（语义等价：归零分支之后就是常规续排段）。 */
   const resetBranch = lifeBody.slice(lifeBody.indexOf('if(shouldReset'),
-    lifeBody.indexOf("run('UPDATE room SET last_active"));
+    lifeBody.indexOf('const armAt'));
   ok('★ C3 归零分支静默：只 io.reset() + return，不排闹钟 / 不写 last_active / 不落消息',
     resetBranch.length > 0 && /await io\.reset\(\)/.test(resetBranch) &&
     !/rearm|setAlarm|last_active|insertMsgs|allocSeq/.test(resetBranch));
@@ -427,6 +430,47 @@ console.log('== ⑪ P2 横幅字段链路（坑 #42：接口对齐 ≠ 口径对
     !/kind\s*:\s*['"]sys['"]/.test(resetBody) && !/insertMsgs|allocSeq/.test(resetBody));
   ok('★ 探针：把横幅写成落库 sys 消息即红（自证）',
     /kind\s*:\s*['"]sys['"]/.test("broadcast({t:OUT.STATE}); insertMsgs([{kind:'sys'}]);"));
+}
+
+console.log('== ⑫ D1 用量根治（2026-11-14 · 按日 lifecycle / 巡检由 ws 帧驱动）==');
+{
+  /* 事件：DO 免费套餐 5,000,000 rows_read/日 被「挂着 ws 但没人操作」的房间吃光。
+     根因：online>0 → 60s alarm 自续 → 每轮 COUNT(*)×2 ＋ MIN(CASE…) 全表聚合。
+     D1 守的是「旧形态一回来就红」，不因现状已修好就变成摆设断言。 */
+  const nextFn = namedBlocks(life, 'nextAlarmAt').map(b => b.body).join('\n');
+  const runFn  = namedBlocks(life, 'runLifecycle').map(b => b.body).join('\n');
+  const armFn  = namedBlocks(room, 'armFromUserAction').map(b => b.body).join('\n');
+  ok('★ D1 定义 LIFECYCLE_MS = DAY（按日足够，1440 次/天 → 1 次/天）',
+    /export const LIFECYCLE_MS\s*=\s*DAY/.test(life) && /export const DAY\s*=\s*86400000/.test(life));
+  ok('★ D1 nextAlarmAt 不吃 online / 不再排 SWEEP_MS 短周期',
+    !/\bonline\b/.test(nextFn) && !/SWEEP_MS/.test(nextFn));
+  /* ★ 函数体 + 签名两层：只扫 body 会漏掉「把 online 形参放回来」的留口子回退。 */
+  const nextSig = (life.match(/export function nextAlarmAt\s*\([^)]*\)/) || [''])[0];
+  ok('★ D1 nextAlarmAt 签名不含 online / nextExpiry（不给旧形态留形参口子）',
+    nextSig.length > 0 && !/\bonline\b|\bnextExpiry\b/.test(nextSig));
+  ok('★ D1 nextAlarmAt 排 Number(now) + LIFECYCLE_MS',
+    /Number\(now\)\s*\+\s*LIFECYCLE_MS/.test(nextFn));
+  ok('★ D1 runLifecycle 不调 io.sweepIdle()（巡检改由 ws 帧驱动）',
+    !/io\.sweepIdle\s*\(/.test(runFn));
+  ok('★ D1 runLifecycle 不再算 SQL_MIN_EXPIRY 表达式全表聚合',
+    !/SQL_MIN_EXPIRY/.test(runFn));
+  ok('★ D1 runLifecycle 不再每轮写 last_active（坑 5 同型）',
+    !/UPDATE\s+room\s+SET\s+last_active/.test(runFn));
+  ok('★ D1 巡检由 webSocketMessage 帧驱动 sweepIdleThrottled()',
+    /serializeAttachment[\s\S]{0,220}sweepIdleThrottled\(\)/.test(room));
+  ok('★ D1 armFromUserAction 用 SQL_HAS_CONTENT（O(1)），不再 COUNT(*) / MIN 全表',
+    /SQL_HAS_CONTENT/.test(armFn) && !/SQL_COUNT_CONTENT|SQL_MIN_EXPIRY/.test(armFn));
+  ok('★ D1 SQL_HAS_CONTENT 是 LIMIT 1 存在性，不含 COUNT(*)',
+    /export const SQL_HAS_CONTENT[\s\S]{0,260}LIMIT 1/.test(life) &&
+    !/export const SQL_HAS_CONTENT[\s\S]{0,260}COUNT\(\*\)/.test(life));
+  ok('★ D1 探针：把「online>0 → now+SWEEP_MS」放回排程即被抓（自证）',
+    /Number\(online\)\s*>\s*0[\s\S]{0,80}SWEEP_MS/.test(
+      'export function nextAlarmAt({now,online}){ if(Number(online) > 0) at.push(Number(now) + SWEEP_MS); }'));
+  ok('★ D1 探针：alarm 链放回 io.sweepIdle() / SQL_MIN_EXPIRY 即被抓（自证）',
+    /io\.sweepIdle\s*\(/.test('async function runLifecycle(){ io.sweepIdle(); }') &&
+    /SQL_MIN_EXPIRY/.test('async function runLifecycle(){ const e = q(SQL_MIN_EXPIRY)[0].e; }'));
+  ok('★ D1 探针：arm 路径放回 COUNT(*) 即被抓（自证）',
+    /SQL_COUNT_CONTENT/.test('async armFromUserAction(){ const c = q(SQL_COUNT_CONTENT)[0].c; }'));
 }
 
 console.log('---------------------------');

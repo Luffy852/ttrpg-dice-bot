@@ -17,8 +17,8 @@
 import {DurableObject} from 'cloudflare:workers';
 import {createRoomCore, planImport, mergeOrder} from './core.js';
 import {checkIn, IN, ERR, OUT} from '../../../packages/protocol/src/frames.js';
-import {runLifecycle, nextAlarmAt, RESET_SQL, resetFrames, SQL_MAX_EXPIRY, SQL_MIN_EXPIRY,
-  SQL_COUNT_CONTENT} from './lifecycle.js';
+import {runLifecycle, nextAlarmAt, RESET_SQL, resetFrames, SQL_MAX_EXPIRY,
+  LIFECYCLE_MS, SWEEP_MS, SQL_HAS_CONTENT} from './lifecycle.js';
 import {exportAs, FORMAT, fromNdjson, buildFilterClause} from './export.js';
 import {parseFilters, filterSummary, hasFilters} from '../../../packages/protocol/src/export-filter.js';
 import {ymdhm, esc} from '../../../packages/engine/src/util.js';
@@ -34,8 +34,9 @@ const cut0 = () => Date.now() - KEEP_DAYS * DAY;
  * 【为什么是 3 分钟】前端每 20 秒发一次心跳，留 9 倍余量 —— 弱网重传不会误伤挂机的人。 */
 const IDLE_MS  = 3 * 60 * 1000;
 const KEEP_DAYS = 30;          // 房间消息留存（导出续期窗口 / 导入"已过期"判定用）
-/* ★ S2 还原路径独立步骤：巡检间隔 SWEEP_MS、提醒提前量 WARN_MS、到期窗口 KEEP_MS
- *   全部迁到 lifecycle.js（alarm 决策的单一源）。这里不再留旧 WARN_DAYS=23 的
+/* ★ S2 还原路径独立步骤 → D1 用量根治：提醒提前量 WARN_MS、到期窗口 KEEP_MS、
+ *   按日周期 LIFECYCLE_MS 都在 lifecycle.js（alarm 决策的单一源）；SWEEP_MS 退化为
+ *   **ws 帧驱动巡检的内存节流**，不再用来排 alarm。这里不再留旧 WARN_DAYS=23 的
  *   「now − created_at > 23d 且只置一次」判定 —— 那是 G·8.5 坑 3 要重做的旧口径。 */
 
 /* ★ schema 的唯一出处是 schema.sql（含注释与理由）；这里是它的运行时副本。
@@ -629,6 +630,9 @@ export class RoomDO extends DurableObject {
     const anonId = att.anon_id;
     /* ★ 任何帧都算"还活着"（心跳 ping 也是帧）—— 刷新 ts，避免被巡检误判离线 */
     ws.serializeAttachment(Object.assign({}, att, {ts:Date.now()}));
+    /* ★ D1：半开连接巡检改由帧驱动（零 alarm / 零全表 SQL），内存节流 SWEEP_MS。
+       同房间其他连接的 20s 心跳会顺带触发它，超过 IDLE_MS 的半开连接仍会被清掉。 */
+    this.sweepIdleThrottled();
 
     if(f.t === IN.HELLO){
       const room = await this.storage().getRoom();
@@ -701,6 +705,19 @@ export class RoomDO extends DurableObject {
   }
   async webSocketError(ws){ this.broadcast(this.presenceFrame()); }
 
+  /* ★ D1（2026-11-14 用量根治）：巡检不再靠 alarm 每 60s 驱动 —— 那会让挂着 ws
+   *   的房间每天自续 1440 次、每轮跑 COUNT(*)×2 ＋ MIN(CASE…) 全表聚合，吃光
+   *   Cloudflare DO 免费套餐 5,000,000 rows_read/日（账户级，含 preview 实例）。
+   *   改为「收到任意 ws 帧时顺带扫一次」，内存时间戳按 SWEEP_MS 节流：
+   *   纯 ws 遍历 / 零 SQLite 全表查询；DO 休眠唤醒后重建时间戳，下次帧自然续上。
+   *   心跳 20s ≪ IDLE_MS 180s，半开连接的清理语义与 B 组真机结论完全一致。 */
+  sweepIdleThrottled(){
+    const now = Date.now();
+    if(this._lastSweep && now - this._lastSweep < SWEEP_MS) return;
+    this._lastSweep = now;
+    this.sweepIdle();
+  }
+
   /* ★ 巡检：把"半开连接"关掉 —— 息屏 / 切后台 / 断网的对端不会发关闭帧，
    *   服务端这边 readyState 一直是 1，只能靠"多久没收到帧"来判定。
    *   【为什么不能只靠 readyState】实测：对端断开后 getWebSockets() 仍返回它且 readyState=1。 */
@@ -746,7 +763,8 @@ export class RoomDO extends DurableObject {
    * ★ S2 还原路径独立步骤：旧 alarm 的「提前 7 天落一条 kind:'sys' 消息」（坑 2）
    *   与「无条件 setAlarm + 每日空转」已全部移除。现在这里只做 IO 适配，
    *   生产与 tests/test_schema.mjs 真跑的是同一个 runLifecycle()。
-   *   半开连接巡检、30 天滚动清理、提前 7 天提醒、归零还原仍在同一 次 alarm（G·8.5）。 */
+   *   ★ D1：半开连接巡检已移到 ws 帧路径（webSocketMessage → sweepIdleThrottled），
+   *     本 alarm 只跑「30 天滚动清理 / 提前 7 天提醒 / 归零还原」，按日一次（G·8.5 ＋ D1）。 */
   async alarm(){
     return runLifecycle(this.lifecycleDB(), this.lifecycleIO(), Date.now());
   }
@@ -759,7 +777,8 @@ export class RoomDO extends DurableObject {
       run: (s, ...p) => { sql.exec(s, ...p); },
     };
   }
-  /** IO 适配：广播 / 还原 / 巡检 / 在线数 / 单实例续排（唯一替身只出现在真跑测试里） */
+  /** IO 适配：广播 / 还原 / 单实例续排（唯一替身只出现在真跑测试里）。
+   *  ★ D1：sweepIdle / onlineCount 两个键只为兼容真跑替身保留，alarm 链不再调用它们。 */
   lifecycleIO(){
     return {
       broadcast:  f  => this.broadcast(f),
@@ -793,16 +812,15 @@ export class RoomDO extends DurableObject {
   }
 
   /** 明确的用户请求路径（join / ws 握手 / 发指令 / 导出 / 导入）才重新 arm；
-   *  取 min(巡检 / 下一条到期 / reset_at−7d / reset_at)，空容器返回 null 不排（G·8.5）。
+   *  ★ D1：只做 O(1) 存在性判据（SQL_HAS_CONTENT），不再跑 COUNT(*) / MIN(CASE…) 全表聚合；
+   *    候选时刻由 nextAlarmAt 按日算，巡检不进排程，空容器返回 null 不排（G·8.5 / L6）。
    *  ★ 只 arm，不刷新 reset_at —— 纯访问不续活（口径 9）。 */
   async armFromUserAction(){
     const now = Date.now();
     const q = (s, ...p) => this.sql.exec(s, ...p).toArray();
     const room = q('SELECT reset_at FROM room WHERE id = 1')[0] || {};
-    const hasContent = Number(q(SQL_COUNT_CONTENT)[0].c) > 0;
-    const nextExpiry = q(SQL_MIN_EXPIRY)[0].e;
-    const at = nextAlarmAt({now, online:this.onlineCount(), nextExpiry,
-      resetAt:room.reset_at, hasContent});
+    const hasContent = Number(q(SQL_HAS_CONTENT)[0].c) > 0;
+    const at = nextAlarmAt({now, resetAt:room.reset_at, hasContent});
     await this.rearm(at);
   }
 
